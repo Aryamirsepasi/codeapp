@@ -41,3 +41,20 @@ The source code of the built-in languages are hosted on these repositories.
 | PHP 8.3.2 | [php-src](https://github.com/bummoblizard/php-src/tree/PHP-8.3.2)|
 | Node.js 18.19.0 | [nodejs-mobile](https://github.com/1Conan/nodejs-mobile)|
 | OpenJDK 8 | [android-openjdk-build-multiarch](https://github.com/thebaselab/android-openjdk-build-multiarch)|
+
+## AI Code Assistant
+
+Code App features a built-in AI code assistant that helps you write, refactor, and debug code directly in the editor. The assistant supports multiple AI providers including OpenAI, Anthropic, and OpenRouter, allowing you to choose the model that best fits your needs.
+
+![Code Assistant](images/assistant.png)
+
+### Features
+
+- **Intelligent Code Editing**: The assistant uses structured SEARCH/REPLACE blocks to precisely locate and modify code, ensuring accurate edits even with formatting differences
+- **Multi-Provider Support**: Choose from OpenAI, Anthropic, or OpenRouter with support for custom models
+- **Context-Aware**: Automatically includes your current selection and file context in conversations
+- **Smart Code Matching**: Advanced algorithms match AI-generated code to the correct location in your files using structural anchors and fuzzy matching
+- **Conversation History**: Keep track of your coding sessions with persistent chat history
+- **File Attachments**: Attach files to provide additional context for the assistant
+
+The assistant integrates seamlessly with the editor, allowing you to apply code changes with a single click while maintaining full control over your codebase.
