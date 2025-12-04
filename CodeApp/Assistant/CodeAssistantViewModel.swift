@@ -135,6 +135,20 @@ final class CodeAssistantViewModel: ObservableObject {
     }
     @Published var activeConversationTitle: String = "New Chat"
 
+    /// Optional context about the user's current selection in the editor.
+    /// This is populated by the UI layer just before sending a message so the
+    /// model can reliably target edits to the right region of the file.
+    struct SelectionContext {
+        let text: String
+        let startLine: Int
+        let startColumn: Int
+        let endLine: Int
+        let endColumn: Int
+        let languageHint: String?
+    }
+
+    @Published var selectionContext: SelectionContext?
+
     var currentModel: String {
         modelOverrides[selectedProvider] ?? selectedProvider.defaultModel
     }
@@ -149,21 +163,29 @@ final class CodeAssistantViewModel: ObservableObject {
     private var streamTask: Task<Void, Never>?
     private let systemPrompt =
         """
-        You are Code App's AI coding assistant. Provide concise, actionable answers using clear Markdown formatting. Follow best practices, robust patterns, and modern UI/UX principles. When offering code, prefer idiomatic, production-ready solutions with comments where helpful, and include brief explanations and alternatives when relevant.
-        
+        You are Code App's AI coding assistant embedded directly in the editor.
+        Provide concise, actionable answers using clear Markdown formatting. Prefer idiomatic, production‑ready code with brief explanations when they materially help.
+
         You specialize in the following runtimes and should tailor examples and guidance accordingly:
         - Python 3.9.2
         - Clang 14.0.0 (C/C++)
         - PHP 8.3.2
         - Node.js 18.19.0
         - OpenJDK 8 (Java)
-        
-        Guidelines:
+
+        Editing behaviour:
+        - The client may send you a "Current selection (edit target)" code block from the open file.
+        - Treat that selection as the **only** region you are allowed to change unless explicitly told otherwise.
+        - When refactoring or fixing code, respond with a **self‑contained replacement** for the selection (or a small, clearly‑bounded region), not a diff.
+        - Copy unchanged surrounding lines exactly so the client can safely swap the selection with your answer.
+        - Do not re‑format or rewrite the entire file unless the user explicitly asks for a whole‑file rewrite.
+
+        General guidelines:
         - Be precise and avoid unnecessary verbosity.
         - Validate assumptions and ask for missing details when needed.
         - Emphasize security, performance, readability, and maintainability.
-        - Provide step-by-step migration or debugging advice when appropriate.
-        - Use platform-appropriate tooling, testing, and packaging recommendations.
+        - Provide step‑by‑step migration or debugging advice when appropriate.
+        - Use platform‑appropriate tooling, testing, and packaging recommendations.
         - When presenting code blocks, specify the correct language for syntax highlighting.
         """
 
@@ -505,8 +527,32 @@ final class CodeAssistantViewModel: ObservableObject {
 
     private func buildPayload(for text: String, attachments: [Attachment]) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var blocks: [String] = []
+        if !trimmed.isEmpty {
+            blocks.append(trimmed)
+        }
+
+        if let selectionContext, !selectionContext.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var selectionHeader = "Current selection (edit target):\n"
+            selectionHeader += "Lines \(selectionContext.startLine):\(selectionContext.startColumn) → \(selectionContext.endLine):\(selectionContext.endColumn)\n"
+
+            let language = selectionContext.languageHint ?? "text"
+            let fenced =
+                "```\(language)\n\(selectionContext.text)\n```\n"
+
+            blocks.append(selectionHeader + fenced)
+        }
+
         let attachmentBlock = attachments.map(\.promptBlock).joined(separator: "\n\n")
-        return [trimmed, attachmentBlock]
+        if !attachmentBlock.isEmpty {
+            blocks.append(attachmentBlock)
+        }
+
+        // Clear selection context after it has been consumed for this request.
+        selectionContext = nil
+
+        return blocks
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
     }
@@ -541,7 +587,7 @@ final class CodeAssistantViewModel: ObservableObject {
         }
     }
 
-    private static func languageHint(for url: URL) -> String {
+    static func languageHint(for url: URL) -> String {
         let ext = url.pathExtension.lowercased()
         let mapping: [String: String] = [
             "swift": "swift",

@@ -17,6 +17,8 @@ struct CodeAssistantPanel: View {
     @ObservedObject var viewModel: CodeAssistantViewModel
     @EnvironmentObject var app: MainApp
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// Optional close action so the hosting container can dismiss the panel.
+    var onClose: (() -> Void)? = nil
 
     @State private var showsAttachmentPicker = false
     @State private var showsHistorySheet = false
@@ -113,6 +115,16 @@ struct CodeAssistantPanel: View {
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.bordered)
+
+            // Close assistant
+            Button {
+                onClose?()
+            } label: {
+                Label("Close", systemImage: "xmark")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Close Assistant")
         }
         .padding()
     }
@@ -262,7 +274,7 @@ struct CodeAssistantPanel: View {
                             .stroke(Color(.separator), lineWidth: 0.5)
                     )
                     .onSubmit {
-                        viewModel.sendMessage()
+                        sendMessageWithEditorSelection()
                     }
                 
                 // Send/Stop button
@@ -270,7 +282,7 @@ struct CodeAssistantPanel: View {
                     if viewModel.isStreaming {
                         viewModel.stopStreaming()
                     } else {
-                        viewModel.sendMessage()
+                        sendMessageWithEditorSelection()
                     }
                 } label: {
                     Image(systemName: viewModel.isStreaming ? "stop.circle.fill" : "paperplane.circle.fill")
@@ -282,6 +294,50 @@ struct CodeAssistantPanel: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 12)
+        }
+    }
+
+    /// Sends the current prompt to the assistant, enriching it with the
+    /// editor's current selection so the model can target edits precisely.
+    private func sendMessageWithEditorSelection() {
+        Task {
+            // If there is no active text editor, just send the plain message.
+            guard let activeFile = app.activeTextEditor else {
+                await MainActor.run {
+                    viewModel.sendMessage()
+                }
+                return
+            }
+
+            // Capture a snapshot of the current selection and nearby context.
+            let selection = await app.monacoInstance.selectionSnapshot()
+            let liveText = await app.monacoInstance.currentModelValue() ?? activeFile.content
+
+            if let selection {
+                let selectionText = selection.text
+
+                // Derive a language hint from the active file URL so the model
+                // can render the selection with correct syntax highlighting.
+                let languageHint = CodeAssistantViewModel.languageHint(for: activeFile.url)
+
+                await MainActor.run {
+                    viewModel.selectionContext = CodeAssistantViewModel.SelectionContext(
+                        text: selectionText,
+                        startLine: selection.startLine,
+                        startColumn: selection.startColumn,
+                        endLine: selection.endLine,
+                        endColumn: selection.endColumn,
+                        languageHint: languageHint
+                    )
+                    viewModel.sendMessage()
+                }
+            } else {
+                // No selection information; fall back to a normal send.
+                await MainActor.run {
+                    viewModel.selectionContext = nil
+                    viewModel.sendMessage()
+                }
+            }
         }
     }
 

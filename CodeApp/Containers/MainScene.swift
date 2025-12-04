@@ -125,6 +125,12 @@ struct MainScene: View {
     }
 }
 
+private extension Comparable {
+    func clamped(to limits: ClosedRange<Self>) -> Self {
+        min(max(self, limits.lowerBound), limits.upperBound)
+    }
+}
+
 private struct MainView: View {
 
     @EnvironmentObject var App: MainApp
@@ -141,7 +147,7 @@ private struct MainView: View {
     @Environment(\.colorScheme) var colorScheme: ColorScheme
 
     @StateObject private var assistantViewModel = CodeAssistantViewModel()
-    @State private var assistantDragOffset: CGFloat = 0
+    @SceneStorage("assistant.panel.width") private var assistantPanelWidth: Double = 360
 
     @AppStorage("changelog.lastread") var changeLogLastReadVersion = "0.0"
     @AppStorage("runeStoneEditorEnabled") var runeStoneEditorEnabled: Bool = false
@@ -206,6 +212,58 @@ private struct MainView: View {
                                     .environmentObject(extensionManager.activityBarManager)
                             }
                         }
+
+                        if assistantViewModel.isPresented {
+                            // Trailing assistant panel with a draggable resize handle.
+                            let minWidth: CGFloat = 280
+                            let maxWidth: CGFloat =
+                                horizontalSizeClass == .compact
+                                ? geometry.size.width * 0.9 : 520
+
+                            Divider()
+
+                            // Resize handle between editor and assistant.
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.2))
+                                .frame(width: 4)
+                                .contentShape(Rectangle())
+                                .gesture(
+                                    DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            // Drag horizontally to adjust assistant width.
+                                            let current = CGFloat(assistantPanelWidth)
+                                            let proposed = (current - value.translation.width)
+                                                .clamped(to: minWidth...maxWidth)
+                                            assistantPanelWidth = Double(proposed)
+                                        }
+                                )
+
+                            CodeAssistantPanel(
+                                viewModel: assistantViewModel,
+                                onClose: {
+                                    withAnimation(
+                                        .spring(response: 0.35, dampingFraction: 0.85)
+                                    ) {
+                                        assistantViewModel.isPresented = false
+                                    }
+                                }
+                            )
+                            .environmentObject(App)
+                            .frame(width: CGFloat(assistantPanelWidth.clamped(
+                                to: Double(minWidth)...Double(maxWidth))))
+                            .frame(maxHeight: .infinity)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                            .onAppear {
+                                // Initialize stored width into valid bounds for this geometry.
+                                let idealWidth = min(
+                                    max(320, geometry.size.width * 0.35),
+                                    maxWidth
+                                )
+                                assistantPanelWidth = Double(
+                                    CGFloat(assistantPanelWidth).clamped(
+                                        to: minWidth...idealWidth))
+                            }
+                        }
                     }
                     StatusBar()
                         .environmentObject(extensionManager.statusBarManager)
@@ -220,41 +278,6 @@ private struct MainView: View {
                             .trailing, (self.horizontalSizeClass == .compact ? 40 : 10))
                     }
                 }.padding(.bottom, 30).frame(width: geometry.size.width)
-
-                if assistantViewModel.isPresented {
-                    CodeAssistantPanel(viewModel: assistantViewModel)
-                        .environmentObject(App)
-                        .frame(
-                            width: min(
-                                max(360, geometry.size.width * 0.35),
-                                horizontalSizeClass == .compact ? geometry.size.width - 24 : 480
-                            ),
-                            height: min(geometry.size.height * 0.8, 620)
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .padding(.top, horizontalSizeClass == .compact ? 80 : 60)
-                        .padding(.trailing, horizontalSizeClass == .compact ? 8 : 24)
-                        .offset(y: assistantDragOffset)
-                        .gesture(
-                            DragGesture(minimumDistance: 10)
-                                .onChanged { value in
-                                    guard value.translation.height > 0 else { return }
-                                    assistantDragOffset = value.translation.height
-                                }
-                                .onEnded { value in
-                                    if value.translation.height > 120 {
-                                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                                            assistantViewModel.isPresented = false
-                                        }
-                                    }
-                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
-                                        assistantDragOffset = 0
-                                    }
-                                }
-                        )
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .zIndex(50)
-                }
 
             }
         }
@@ -351,11 +374,6 @@ private struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: .codeAssistantToggleRequested)) { _ in
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 assistantViewModel.isPresented.toggle()
-            }
-        }
-        .onChange(of: assistantViewModel.isPresented) { oldValue, newValue in
-            if !newValue {
-                assistantDragOffset = 0
             }
         }
         .ignoresSafeArea(.container, edges: .bottom)
