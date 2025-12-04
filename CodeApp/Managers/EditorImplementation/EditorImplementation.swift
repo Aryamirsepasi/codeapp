@@ -59,7 +59,7 @@ struct MonacoEditorAction: Decodable, Identifiable {
 }
 
 struct MonacoEditorMarker: Decodable, Identifiable {
-    let id = UUID()
+    var id = UUID()
     var endColumn: Int
     var endLineNumber: Int
     var startColumn: Int

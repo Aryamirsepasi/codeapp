@@ -15,7 +15,7 @@ struct EditorImplementationView: View {
 
     var body: some View {
         _EditorImplementationView(implementation: implementation)
-            .onChange(of: editorOptions) { newValue in
+            .onChange(of: editorOptions) { oldValue, newValue in
                 implementation.options = newValue.value
             }
     }

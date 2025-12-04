@@ -27,7 +27,6 @@
 		42DFBA582EC37173009D2E88 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA572EC37173009D2E88 /* MLXLMCommon */; };
 		42DFBA5A2EC37173009D2E88 /* MLXMNIST in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA592EC37173009D2E88 /* MLXMNIST */; };
 		42DFBA5C2EC37173009D2E88 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA5B2EC37173009D2E88 /* MLXVLM */; };
-		42E100162F6C2C9800E2F8BC /* inline-completions.js in Resources */ = {isa = PBXBuildFile; fileRef = 42E101162F6C2C9800E2F8BC /* inline-completions.js */; };
 		42F204F82EC2154300FCE150 /* AIAssistantExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F204F72EC2154300FCE150 /* AIAssistantExtension.swift */; };
 		42F204F92EC2154300FCE150 /* AIAssistantExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F204F72EC2154300FCE150 /* AIAssistantExtension.swift */; };
 		940C68252C646E0400089EA3 /* System.swift in Sources */ = {isa = PBXBuildFile; fileRef = 940C68242C646E0400089EA3 /* System.swift */; };
@@ -1432,7 +1431,6 @@
 		429FBC712EC2711500E8AD97 /* CodeAssistantConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAssistantConfiguration.swift; sourceTree = "<group>"; };
 		429FBC722EC2711500E8AD97 /* CodeAssistantPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAssistantPanel.swift; sourceTree = "<group>"; };
 		429FBC732EC2711500E8AD97 /* CodeAssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAssistantViewModel.swift; sourceTree = "<group>"; };
-		42E101162F6C2C9800E2F8BC /* inline-completions.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "inline-completions.js"; sourceTree = "<group>"; };
 		42F204F72EC2154300FCE150 /* AIAssistantExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIAssistantExtension.swift; sourceTree = "<group>"; };
 		4F30816829662CBF002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4F30816929662D58002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -2529,7 +2527,6 @@
 			isa = PBXGroup;
 			children = (
 				94EF4FDB2C6DF80700994D9C /* monaco-textmate.bundle */,
-				42E101162F6C2C9800E2F8BC /* inline-completions.js */,
 				94EF4FD92C6DF6A900994D9C /* python-lsp */,
 				9424437D2C6E337B00BC862F /* java-lsp */,
 				945D4DFE2B4B171200DE0DBA /* Java */,
@@ -3574,7 +3571,6 @@
 				941969A2280316C7008AAEB2 /* Settings.bundle in Resources */,
 				947515E42E7E886A00822B33 /* Iconv2.icon in Resources */,
 				941969A3280316C7008AAEB2 /* extraCommandsDictionary.plist in Resources */,
-				42E100162F6C2C9800E2F8BC /* inline-completions.js in Resources */,
 				941969A4280316C7008AAEB2 /* npm.bundle in Resources */,
 				941969A6280316C7008AAEB2 /* terminal.bundle in Resources */,
 				941969A7280316C7008AAEB2 /* LaunchScreen.storyboard in Resources */,

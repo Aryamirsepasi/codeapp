@@ -115,16 +115,6 @@ struct CodeAssistantPanel: View {
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.bordered)
-
-            // Close assistant
-            Button {
-                onClose?()
-            } label: {
-                Label("Close", systemImage: "xmark")
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Close Assistant")
         }
         .padding()
     }
@@ -410,55 +400,960 @@ struct CodeAssistantPanel: View {
         }
     }
 
+    // MARK: - Search/Replace Block Parser
+    
+    /// Represents a parsed SEARCH/REPLACE edit block from AI output
+    private struct SearchReplaceBlock {
+        let searchText: String
+        let replaceText: String
+        let language: String?
+        
+        /// Parse all SEARCH/REPLACE blocks from AI-generated code
+        static func parse(from text: String) -> [SearchReplaceBlock] {
+            var blocks: [SearchReplaceBlock] = []
+            
+            // Pattern matches code blocks containing SEARCH/REPLACE format
+            // Supports both fenced code blocks and raw markers
+            let patterns = [
+                // Fenced code block with language: ```swift\n<<<<<<< SEARCH ... >>>>>>> REPLACE\n```
+                #"```(\w*)\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
+                // Fenced code block without language
+                #"```\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
+                // Raw markers (not in code block)
+                #"<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE"#,
+            ]
+            
+            for (index, pattern) in patterns.enumerated() {
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+                    continue
+                }
+                
+                let range = NSRange(text.startIndex..., in: text)
+                let matches = regex.matches(in: text, options: [], range: range)
+                
+                for match in matches {
+                    var language: String? = nil
+                    var searchText: String = ""
+                    var replaceText: String = ""
+                    
+                    if index == 0 {
+                        // Pattern with language identifier
+                        if match.numberOfRanges >= 4 {
+                            if let langRange = Range(match.range(at: 1), in: text) {
+                                let lang = String(text[langRange])
+                                if !lang.isEmpty {
+                                    language = lang
+                                }
+                            }
+                            if let searchRange = Range(match.range(at: 2), in: text) {
+                                searchText = String(text[searchRange])
+                            }
+                            if let replaceRange = Range(match.range(at: 3), in: text) {
+                                replaceText = String(text[replaceRange])
+                            }
+                        }
+                    } else {
+                        // Patterns without language identifier
+                        if match.numberOfRanges >= 3 {
+                            if let searchRange = Range(match.range(at: 1), in: text) {
+                                searchText = String(text[searchRange])
+                            }
+                            if let replaceRange = Range(match.range(at: 2), in: text) {
+                                replaceText = String(text[replaceRange])
+                            }
+                        }
+                    }
+                    
+                    // Only add if we have valid search text
+                    if !searchText.isEmpty {
+                        blocks.append(SearchReplaceBlock(
+                            searchText: searchText,
+                            replaceText: replaceText,
+                            language: language
+                        ))
+                    }
+                }
+            }
+            
+            return blocks
+        }
+        
+        /// Apply this search/replace block to the original text
+        /// Returns the modified text if the search pattern was found, nil otherwise
+        func apply(to original: String) -> String? {
+            // Strategy 1: Exact match
+            if let range = original.range(of: searchText) {
+                return original.replacingCharacters(in: range, with: replaceText)
+            }
+            
+            // Strategy 2: Normalized whitespace match (preserve original indentation style)
+            if let range = findNormalizedMatch(in: original) {
+                return original.replacingCharacters(in: range, with: replaceText)
+            }
+            
+            // Strategy 3: Line-by-line fuzzy match
+            if let range = findFuzzyLineMatch(in: original) {
+                return original.replacingCharacters(in: range, with: replaceText)
+            }
+            
+            return nil
+        }
+        
+        /// Find a match with normalized whitespace (handles tab/space differences)
+        private func findNormalizedMatch(in original: String) -> Range<String.Index>? {
+            let normalizeWhitespace: (String) -> String = { text in
+                text.components(separatedBy: .newlines)
+                    .map { line in
+                        // Normalize leading whitespace to single representation
+                        let stripped = line.trimmingCharacters(in: .whitespaces)
+                        let leadingCount = line.prefix(while: { $0.isWhitespace }).count
+                        return String(repeating: " ", count: leadingCount) + stripped
+                    }
+                    .joined(separator: "\n")
+            }
+            
+            let normalizedOriginal = normalizeWhitespace(original)
+            let normalizedSearch = normalizeWhitespace(searchText)
+            
+            if let normalizedRange = normalizedOriginal.range(of: normalizedSearch) {
+                // Map back to original string indices
+                let startOffset = normalizedOriginal.distance(
+                    from: normalizedOriginal.startIndex,
+                    to: normalizedRange.lowerBound
+                )
+                let endOffset = normalizedOriginal.distance(
+                    from: normalizedOriginal.startIndex,
+                    to: normalizedRange.upperBound
+                )
+                
+                // Find corresponding position in original by counting newlines
+                let originalLines = original.components(separatedBy: .newlines)
+                let normalizedLines = normalizedOriginal.components(separatedBy: .newlines)
+                
+                var normalizedCharCount = 0
+                var originalCharCount = 0
+                var startLineIdx = 0
+                var endLineIdx = 0
+                
+                // Find start line
+                for (idx, line) in normalizedLines.enumerated() {
+                    if normalizedCharCount + line.count >= startOffset {
+                        startLineIdx = idx
+                        break
+                    }
+                    normalizedCharCount += line.count + 1 // +1 for newline
+                }
+                
+                // Find end line
+                normalizedCharCount = 0
+                for (idx, line) in normalizedLines.enumerated() {
+                    normalizedCharCount += line.count + 1
+                    if normalizedCharCount >= endOffset {
+                        endLineIdx = idx
+                        break
+                    }
+                }
+                
+                // Calculate original string range
+                var startCharIdx = 0
+                for i in 0..<startLineIdx {
+                    startCharIdx += originalLines[i].count + 1
+                }
+                
+                var endCharIdx = 0
+                for i in 0...min(endLineIdx, originalLines.count - 1) {
+                    endCharIdx += originalLines[i].count
+                    if i < endLineIdx {
+                        endCharIdx += 1
+                    }
+                }
+                
+                guard startCharIdx <= original.count && endCharIdx <= original.count else {
+                    return nil
+                }
+                
+                let startIndex = original.index(original.startIndex, offsetBy: startCharIdx)
+                let endIndex = original.index(original.startIndex, offsetBy: endCharIdx)
+                
+                return startIndex..<endIndex
+            }
+            
+            return nil
+        }
+        
+        /// Find a fuzzy match based on line-by-line comparison
+        private func findFuzzyLineMatch(in original: String) -> Range<String.Index>? {
+            let searchLines = searchText.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let originalLines = original.components(separatedBy: .newlines)
+            
+            guard searchLines.count >= 2, originalLines.count >= searchLines.count else {
+                return nil
+            }
+            
+            // Find first matching line with high confidence
+            let firstSearchLine = searchLines[0]
+            var bestStartIdx: Int? = nil
+            var bestScore: Double = 0.7 // Minimum threshold
+            
+            for (idx, originalLine) in originalLines.enumerated() {
+                let trimmed = originalLine.trimmingCharacters(in: .whitespaces)
+                let similarity = tokenSimilarity(firstSearchLine, trimmed)
+                
+                if similarity > bestScore {
+                    // Check if subsequent lines also match
+                    var matchScore = similarity
+                    var matchCount = 1
+                    
+                    for i in 1..<min(searchLines.count, originalLines.count - idx) {
+                        let searchLine = searchLines[i]
+                        let origLine = originalLines[idx + i].trimmingCharacters(in: .whitespaces)
+                        let lineSim = tokenSimilarity(searchLine, origLine)
+                        
+                        if lineSim > 0.6 {
+                            matchScore += lineSim
+                            matchCount += 1
+                        }
+                    }
+                    
+                    let avgScore = matchScore / Double(searchLines.count)
+                    if avgScore > bestScore {
+                        bestScore = avgScore
+                        bestStartIdx = idx
+                    }
+                }
+            }
+            
+            guard let startIdx = bestStartIdx else {
+                return nil
+            }
+            
+            // Find the end index by matching the last few lines
+            let lastSearchLine = searchLines.last!
+            var endIdx = min(startIdx + searchLines.count, originalLines.count)
+            
+            // Refine end position by looking for matching last line
+            for i in (startIdx + 1)..<min(startIdx + searchLines.count + 3, originalLines.count) {
+                let trimmed = originalLines[i].trimmingCharacters(in: .whitespaces)
+                if tokenSimilarity(lastSearchLine, trimmed) > 0.8 {
+                    endIdx = i + 1
+                    break
+                }
+            }
+            
+            // Calculate character range
+            var startOffset = 0
+            for i in 0..<startIdx {
+                startOffset += originalLines[i].count + 1
+            }
+            
+            var endOffset = 0
+            for i in 0..<endIdx {
+                endOffset += originalLines[i].count
+                if i < endIdx - 1 || endIdx < originalLines.count {
+                    endOffset += 1
+                }
+            }
+            
+            guard startOffset < original.count && endOffset <= original.count else {
+                return nil
+            }
+            
+            let startIndex = original.index(original.startIndex, offsetBy: startOffset)
+            let endIndex = original.index(original.startIndex, offsetBy: min(endOffset, original.count))
+            
+            return startIndex..<endIndex
+        }
+        
+        /// Token-based similarity for fuzzy matching
+        private func tokenSimilarity(_ s1: String, _ s2: String) -> Double {
+            if s1 == s2 { return 1.0 }
+            if s1.isEmpty && s2.isEmpty { return 1.0 }
+            if s1.isEmpty || s2.isEmpty { return 0.0 }
+            
+            let tokens1 = Set(s1.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+            let tokens2 = Set(s2.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+            
+            guard !tokens1.isEmpty || !tokens2.isEmpty else { return 0.0 }
+            
+            let intersection = tokens1.intersection(tokens2).count
+            let union = tokens1.union(tokens2).count
+            return union > 0 ? Double(intersection) / Double(union) : 0.0
+        }
+    }
+    
+    // MARK: - Smart Code Matcher
+    
+    /// A sophisticated code matcher that uses LCS-based scoring, structural anchor detection,
+    /// and fuzzy line matching to find the optimal replacement region in the original code.
+    private struct SmartCodeMatcher {
+        /// Finds the best replacement range for AI output in the original content
+        func findBestReplacementRange(
+            aiOutput: String,
+            originalContent: String
+        ) -> Range<String.Index>? {
+            let originalLinesArray = originalContent.components(separatedBy: .newlines)
+            let aiLinesArray = aiOutput.components(separatedBy: .newlines)
+            let aiLines = normalizeLines(aiLinesArray)
+            let originalLines = normalizeLines(originalLinesArray)
+            
+            guard !aiLines.isEmpty && !originalLines.isEmpty else {
+                return nil
+            }
+            
+            // Phase 0: Try exact first-line match with context expansion
+            if let exactRange = findWithExactFirstLineMatch(
+                aiLines: aiLines,
+                aiLinesArray: aiLinesArray,
+                originalLines: originalLines,
+                originalLinesArray: originalLinesArray,
+                originalContent: originalContent
+            ) {
+                return exactRange
+            }
+            
+            // Phase 1: Try structural anchor-based matching
+            if let anchorRange = findWithStructuralAnchors(
+                aiLines: aiLines,
+                originalLines: originalLines,
+                originalLinesArray: originalLinesArray,
+                originalContent: originalContent
+            ) {
+                return anchorRange
+            }
+            
+            // Phase 2: Try function/block boundary detection
+            if let blockRange = findWithBlockBoundaries(
+                aiLines: aiLines,
+                aiLinesArray: aiLinesArray,
+                originalLines: originalLines,
+                originalLinesArray: originalLinesArray,
+                originalContent: originalContent
+            ) {
+                return blockRange
+            }
+            
+            // Phase 3: Use LCS-based sliding window search
+            if let lcsRange = findWithLCSAlignment(
+                aiLines: aiLines,
+                originalLines: originalLines,
+                originalLinesArray: originalLinesArray,
+                originalContent: originalContent
+            ) {
+                return lcsRange
+            }
+            
+            return nil
+        }
+        
+        /// Normalizes lines by trimming trailing whitespace and collapsing internal whitespace
+        private func normalizeLines(_ lines: [String]) -> [String] {
+            return lines.map { line in
+                // Trim trailing whitespace but preserve leading indentation
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Collapse multiple spaces/tabs into single space for comparison
+                return trimmed.components(separatedBy: .whitespacesAndNewlines)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+            }
+        }
+        
+        /// Try to find exact match for the first non-empty line, then expand to find bounds
+        private func findWithExactFirstLineMatch(
+            aiLines: [String],
+            aiLinesArray: [String],
+            originalLines: [String],
+            originalLinesArray: [String],
+            originalContent: String
+        ) -> Range<String.Index>? {
+            // Find first significant non-empty line in AI output
+            guard let firstSigIndex = aiLines.firstIndex(where: { !$0.isEmpty && $0.count > 3 }) else {
+                return nil
+            }
+            let firstSigLine = aiLines[firstSigIndex]
+            
+            // Find exact or near-exact matches in original
+            var candidates: [(startIdx: Int, similarity: Double)] = []
+            for (idx, origLine) in originalLines.enumerated() {
+                let similarity = lineSimilarity(firstSigLine, origLine)
+                if similarity > 0.9 {
+                    candidates.append((idx, similarity))
+                }
+            }
+            
+            guard !candidates.isEmpty else { return nil }
+            
+            // For each candidate, score the full match
+            var bestMatch: (start: Int, end: Int)? = nil
+            var bestScore: Double = 0.0
+            
+            for candidate in candidates {
+                let adjustedStart = max(0, candidate.startIdx - firstSigIndex)
+                let estimatedEnd = min(originalLines.count, adjustedStart + aiLines.count)
+                
+                // Score this region
+                let score = scoreRegionAlignment(
+                    aiLines: aiLines,
+                    originalLines: originalLines,
+                    windowStart: adjustedStart,
+                    windowEnd: estimatedEnd
+                )
+                
+                if score > bestScore && score > 0.6 {
+                    bestScore = score
+                    bestMatch = (adjustedStart, estimatedEnd)
+                }
+            }
+            
+            guard let match = bestMatch else { return nil }
+            
+            return lineRangeToCharacterRange(
+                lineStart: match.start,
+                lineEnd: match.end,
+                originalLines: originalLinesArray,
+                in: originalContent
+            )
+        }
+        
+        /// Detects if a line is a structural anchor (function signature, class declaration, etc.)
+        private func isStructuralAnchor(_ line: String) -> Bool {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Swift-specific anchors
+            let swiftAnchors = trimmed.contains("func ") ||
+                   trimmed.contains("class ") ||
+                   trimmed.contains("struct ") ||
+                   trimmed.contains("enum ") ||
+                   trimmed.contains("protocol ") ||
+                   trimmed.contains("extension ") ||
+                   trimmed.contains("init(") ||
+                   trimmed.contains("deinit") ||
+                   trimmed.hasPrefix("import ") ||
+                   trimmed.hasPrefix("@") ||
+                   (trimmed.hasPrefix("private ") && (trimmed.contains("func ") || trimmed.contains("var ") || trimmed.contains("let "))) ||
+                   (trimmed.hasPrefix("public ") && (trimmed.contains("func ") || trimmed.contains("var ") || trimmed.contains("let "))) ||
+                   (trimmed.hasPrefix("internal ") && (trimmed.contains("func ") || trimmed.contains("var "))) ||
+                   (trimmed.hasPrefix("fileprivate ") && trimmed.contains("func "))
+            
+            // JavaScript/TypeScript anchors
+            let jsAnchors = trimmed.hasPrefix("function ") ||
+                   trimmed.hasPrefix("const ") ||
+                   trimmed.hasPrefix("let ") ||
+                   trimmed.hasPrefix("export ") ||
+                   trimmed.hasPrefix("async ") ||
+                   trimmed.contains("=> {")
+            
+            // Python anchors
+            let pythonAnchors = trimmed.hasPrefix("def ") ||
+                   trimmed.hasPrefix("class ") ||
+                   trimmed.hasPrefix("async def ") ||
+                   trimmed.hasPrefix("@")
+            
+            // C/C++/Java anchors
+            let cAnchors = trimmed.hasPrefix("void ") ||
+                   trimmed.hasPrefix("int ") ||
+                   trimmed.hasPrefix("public ") ||
+                   trimmed.hasPrefix("private ") ||
+                   trimmed.hasPrefix("protected ") ||
+                   trimmed.hasPrefix("#include") ||
+                   trimmed.hasPrefix("#define") ||
+                   trimmed.hasPrefix("#if")
+            
+            // Block boundaries (language-agnostic)
+            let blockBoundaries = trimmed == "}" ||
+                   trimmed == "{" ||
+                   trimmed.hasSuffix("{") ||
+                   trimmed.hasPrefix("}")
+            
+            return swiftAnchors || jsAnchors || pythonAnchors || cAnchors || blockBoundaries
+        }
+        
+        /// Detects function or block boundaries for more precise matching
+        private func findWithBlockBoundaries(
+            aiLines: [String],
+            aiLinesArray: [String],
+            originalLines: [String],
+            originalLinesArray: [String],
+            originalContent: String
+        ) -> Range<String.Index>? {
+            // Find opening signature in AI output (first line with function/class definition)
+            var openingLineIdx: Int? = nil
+            var closingLineIdx: Int? = nil
+            
+            for (idx, line) in aiLines.enumerated() {
+                if openingLineIdx == nil && isBlockOpening(line) {
+                    openingLineIdx = idx
+                }
+                // Track the last closing brace
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == "}" || trimmed.hasPrefix("}") {
+                    closingLineIdx = idx
+                }
+            }
+            
+            guard let openIdx = openingLineIdx else { return nil }
+            
+            let openingLine = aiLines[openIdx]
+            
+            // Find matching opening in original
+            var bestOrigStart: Int? = nil
+            var bestSimilarity: Double = 0.8
+            
+            for (idx, origLine) in originalLines.enumerated() {
+                let similarity = lineSimilarity(openingLine, origLine)
+                if similarity > bestSimilarity {
+                    bestSimilarity = similarity
+                    bestOrigStart = idx
+                }
+            }
+            
+            guard let origStart = bestOrigStart else { return nil }
+            
+            // Find matching closing brace in original by counting brace depth
+            var braceDepth = 0
+            var origEnd = origStart
+            var foundOpening = false
+            
+            for idx in origStart..<originalLines.count {
+                let line = originalLinesArray[idx]
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                
+                braceDepth += line.filter { $0 == "{" }.count
+                if braceDepth > 0 { foundOpening = true }
+                braceDepth -= line.filter { $0 == "}" }.count
+                
+                if foundOpening && braceDepth == 0 {
+                    origEnd = idx + 1
+                    break
+                }
+                
+                // Safety limit
+                if idx - origStart > aiLines.count + 20 {
+                    origEnd = min(origStart + aiLines.count, originalLines.count)
+                    break
+                }
+            }
+            
+            if origEnd <= origStart {
+                origEnd = min(origStart + aiLines.count, originalLines.count)
+            }
+            
+            return lineRangeToCharacterRange(
+                lineStart: origStart,
+                lineEnd: origEnd,
+                originalLines: originalLinesArray,
+                in: originalContent
+            )
+        }
+        
+        /// Check if a line opens a block (function, class, etc.)
+        private func isBlockOpening(_ line: String) -> Bool {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return (trimmed.contains("func ") || 
+                    trimmed.contains("class ") || 
+                    trimmed.contains("struct ") ||
+                    trimmed.contains("enum ") ||
+                    trimmed.contains("extension ") ||
+                    trimmed.hasPrefix("def ") ||
+                    trimmed.hasPrefix("function ") ||
+                    trimmed.contains("=> {")) &&
+                   (trimmed.hasSuffix("{") || trimmed.hasSuffix(":"))
+        }
+        
+        /// Finds replacement range using structural anchors
+        private func findWithStructuralAnchors(
+            aiLines: [String],
+            originalLines: [String],
+            originalLinesArray: [String],
+            originalContent: String
+        ) -> Range<String.Index>? {
+            // Find structural anchors in AI output
+            var anchorIndices: [Int] = []
+            for (index, line) in aiLines.enumerated() {
+                if isStructuralAnchor(line) && !line.isEmpty {
+                    anchorIndices.append(index)
+                }
+            }
+            
+            guard !anchorIndices.isEmpty else {
+                return nil
+            }
+            
+            // Try to find matching anchors in original
+            var bestMatch: (start: Int, end: Int)? = nil
+            var bestScore: Double = 0.0
+            
+            // Prioritize function signatures over closing braces
+            let prioritizedAnchors = anchorIndices.sorted { idx1, idx2 in
+                let line1 = aiLines[idx1]
+                let line2 = aiLines[idx2]
+                let isFunc1 = line1.contains("func ") || line1.contains("def ") || line1.contains("function ")
+                let isFunc2 = line2.contains("func ") || line2.contains("def ") || line2.contains("function ")
+                if isFunc1 && !isFunc2 { return true }
+                if !isFunc1 && isFunc2 { return false }
+                return idx1 < idx2
+            }
+            
+            // For each anchor in AI output, try to find it in original
+            for anchorIndex in prioritizedAnchors.prefix(5) {
+                let anchorLine = aiLines[anchorIndex]
+                
+                // Search for this anchor in original
+                for (origIndex, origLine) in originalLines.enumerated() {
+                    let similarity = lineSimilarity(anchorLine, origLine)
+                    if similarity > 0.80 {
+                        // Found matching anchor, adjust for position within AI output
+                        let adjustedStart = max(0, origIndex - anchorIndex)
+                        let estimatedEnd = min(originalLines.count, adjustedStart + aiLines.count + 2)
+                        
+                        // Score this potential match
+                        let score = scoreRegionAlignment(
+                            aiLines: aiLines,
+                            originalLines: originalLines,
+                            windowStart: adjustedStart,
+                            windowEnd: estimatedEnd
+                        )
+                        
+                        // Boost score for function signature matches
+                        let boostedScore = anchorLine.contains("func ") ? score * 1.1 : score
+                        
+                        if boostedScore > bestScore && score > 0.45 {
+                            bestScore = boostedScore
+                            bestMatch = (adjustedStart, estimatedEnd)
+                        }
+                    }
+                }
+            }
+            
+            guard let match = bestMatch else {
+                return nil
+            }
+            
+            return lineRangeToCharacterRange(
+                lineStart: match.start,
+                lineEnd: match.end,
+                originalLines: originalLinesArray,
+                in: originalContent
+            )
+        }
+        
+        /// Finds replacement range using LCS-based alignment scoring
+        private func findWithLCSAlignment(
+            aiLines: [String],
+            originalLines: [String],
+            originalLinesArray: [String],
+            originalContent: String
+        ) -> Range<String.Index>? {
+            let aiLineCount = aiLines.count
+            guard aiLineCount > 0 else { return nil }
+            
+            // Allow matching even if AI output is longer than original
+            guard originalLines.count > 0 else { return nil }
+            
+            var bestMatch: (start: Int, end: Int)? = nil
+            var bestScore: Double = 0.0
+            let minScore: Double = 0.35 // Lower threshold for more flexibility
+            
+            // Try different window sizes to handle additions/deletions
+            let baseWindowSize = aiLineCount
+            let deltas = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 8, 10]
+            
+            for delta in deltas {
+                let windowSize = max(1, min(originalLines.count, baseWindowSize + delta))
+                
+                // Slide window across original
+                let maxStart = max(0, originalLines.count - windowSize)
+                for start in 0...maxStart {
+                    let end = start + windowSize
+                    
+                    let score = scoreRegionAlignment(
+                        aiLines: aiLines,
+                        originalLines: originalLines,
+                        windowStart: start,
+                        windowEnd: end
+                    )
+                    
+                    if score > bestScore && score >= minScore {
+                        bestScore = score
+                        bestMatch = (start, end)
+                    }
+                }
+            }
+            
+            guard let match = bestMatch else {
+                return nil
+            }
+            
+            return lineRangeToCharacterRange(
+                lineStart: match.start,
+                lineEnd: match.end,
+                originalLines: originalLinesArray,
+                in: originalContent
+            )
+        }
+        
+        /// Scores region alignment using LCS-based algorithm
+        private func scoreRegionAlignment(
+            aiLines: [String],
+            originalLines: [String],
+            windowStart: Int,
+            windowEnd: Int
+        ) -> Double {
+            guard windowStart >= 0, windowEnd <= originalLines.count, windowStart < windowEnd else {
+                return 0.0
+            }
+            
+            let windowLines = Array(originalLines[windowStart..<windowEnd])
+            let maxLines = max(aiLines.count, windowLines.count)
+            
+            guard maxLines > 0 else { return 0.0 }
+            
+            // Calculate LCS-based similarity
+            let lcsLength = computeLCS(aiLines, windowLines)
+            let lcsScore = Double(lcsLength) / Double(maxLines)
+            
+            // Calculate position-aware token similarity
+            var tokenScore = 0.0
+            var weightedCount = 0.0
+            let minCount = min(aiLines.count, windowLines.count)
+            
+            for i in 0..<minCount {
+                let similarity = lineSimilarity(aiLines[i], windowLines[i])
+                // Weight earlier lines more heavily (they're more likely to be anchors)
+                let weight = i < 3 ? 1.5 : 1.0
+                tokenScore += similarity * weight
+                weightedCount += weight
+            }
+            
+            let avgTokenScore = weightedCount > 0 ? tokenScore / weightedCount : 0.0
+            
+            // Bonus for matching structural elements at boundaries
+            var boundaryBonus = 0.0
+            if !aiLines.isEmpty && !windowLines.isEmpty {
+                if lineSimilarity(aiLines[0], windowLines[0]) > 0.8 {
+                    boundaryBonus += 0.1
+                }
+                if aiLines.count > 1 && windowLines.count > 1 {
+                    let lastAI = aiLines[aiLines.count - 1]
+                    let lastWindow = windowLines[windowLines.count - 1]
+                    if lineSimilarity(lastAI, lastWindow) > 0.8 {
+                        boundaryBonus += 0.1
+                    }
+                }
+            }
+            
+            // Combine scores (weighted average with boundary bonus)
+            return min(1.0, (lcsScore * 0.5) + (avgTokenScore * 0.5) + boundaryBonus)
+        }
+        
+        /// Computes Longest Common Subsequence length between two arrays
+        private func computeLCS(_ array1: [String], _ array2: [String]) -> Int {
+            let m = array1.count
+            let n = array2.count
+            
+            guard m > 0 && n > 0 else { return 0 }
+            
+            var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+            
+            for i in 1...m {
+                for j in 1...n {
+                    // Use fuzzy matching for LCS
+                    if lineSimilarity(array1[i - 1], array2[j - 1]) > 0.7 {
+                        dp[i][j] = dp[i - 1][j - 1] + 1
+                    } else {
+                        dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+                    }
+                }
+            }
+            
+            return dp[m][n]
+        }
+        
+        /// Calculates similarity between two lines (0.0 to 1.0)
+        private func lineSimilarity(_ line1: String, _ line2: String) -> Double {
+            if line1 == line2 {
+                return 1.0
+            }
+            
+            // Both empty counts as match
+            if line1.isEmpty && line2.isEmpty {
+                return 1.0
+            }
+            
+            // One empty, one not
+            if line1.isEmpty || line2.isEmpty {
+                return 0.0
+            }
+            
+            // Token-based similarity (Jaccard index)
+            let tokens1 = Set(line1.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+            let tokens2 = Set(line2.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+            
+            guard !tokens1.isEmpty || !tokens2.isEmpty else {
+                // Both are only whitespace/punctuation - check raw character similarity
+                let trimmed1 = line1.trimmingCharacters(in: .whitespaces)
+                let trimmed2 = line2.trimmingCharacters(in: .whitespaces)
+                return trimmed1 == trimmed2 ? 1.0 : 0.0
+            }
+            
+            let intersection = tokens1.intersection(tokens2).count
+            let union = tokens1.union(tokens2).count
+            
+            // Base Jaccard similarity
+            let jaccard = union > 0 ? Double(intersection) / Double(union) : 0.0
+            
+            // Bonus for matching token order (important for signatures)
+            var orderBonus = 0.0
+            let arr1 = Array(tokens1)
+            let arr2 = Array(tokens2)
+            if arr1.count > 0 && arr2.count > 0 {
+                let commonPrefix = zip(arr1, arr2).prefix(while: { $0 == $1 }).count
+                orderBonus = Double(commonPrefix) / Double(max(arr1.count, arr2.count)) * 0.2
+            }
+            
+            return min(1.0, jaccard + orderBonus)
+        }
+        
+        /// Converts a line range to a character range in the original text
+        private func lineRangeToCharacterRange(
+            lineStart: Int,
+            lineEnd: Int,
+            originalLines: [String],
+            in text: String
+        ) -> Range<String.Index>? {
+            guard lineStart >= 0 && lineEnd <= originalLines.count && lineStart < lineEnd else {
+                return nil
+            }
+            
+            // Calculate character offset for start line
+            var startOffset = 0
+            for i in 0..<lineStart {
+                startOffset += originalLines[i].count + 1 // +1 for newline
+            }
+            
+            // Calculate character offset for end line (exclusive)
+            var endOffset = startOffset
+            for i in lineStart..<lineEnd {
+                endOffset += originalLines[i].count
+                if i < lineEnd - 1 {
+                    endOffset += 1 // +1 for newline between lines
+                }
+            }
+            
+            // Include trailing newline if present
+            if lineEnd < originalLines.count {
+                endOffset += 1
+            }
+            
+            guard startOffset <= text.count && endOffset <= text.count else {
+                return nil
+            }
+            
+            let startIndex = text.index(text.startIndex, offsetBy: startOffset, limitedBy: text.endIndex) ?? text.startIndex
+            let endIndex = text.index(text.startIndex, offsetBy: endOffset, limitedBy: text.endIndex) ?? text.endIndex
+            
+            guard startIndex < endIndex else {
+                return nil
+            }
+            
+            return startIndex..<endIndex
+        }
+    }
+    
     private func buildUpdatedText(
         original: String,
         selection: EditorSelectionSnapshot?,
         replacement: String
     ) -> (updated: String, mode: AssistantApplyMode) {
-        // Strategy 1: Use explicit selection if available
+        // Strategy 0: Parse SEARCH/REPLACE blocks from AI response (highest priority)
+        // This is the most reliable method when AI follows the structured format
+        let searchReplaceBlocks = SearchReplaceBlock.parse(from: replacement)
+        if !searchReplaceBlocks.isEmpty {
+            var currentText = original
+            var appliedCount = 0
+            
+            // Apply all blocks in order
+            for block in searchReplaceBlocks {
+                if let updatedText = block.apply(to: currentText) {
+                    currentText = updatedText
+                    appliedCount += 1
+                }
+            }
+            
+            // If at least one block was applied successfully, return the result
+            if appliedCount > 0 {
+                return (currentText, .replaceMatchedCode)
+            }
+            
+            // If blocks were found but couldn't be applied, extract the replacement content
+            // and fall through to other strategies
+        }
+        
+        // Extract clean code from replacement (strip SEARCH/REPLACE markers if present)
+        let cleanReplacement = extractCleanReplacement(from: replacement)
+        
+        // Strategy 1: Use explicit selection if available and valid
         if let selection {
             if let range = selectionRange(for: selection, in: original) {
-                let updated = original.replacingCharacters(in: range, with: replacement)
+                let updated = original.replacingCharacters(in: range, with: cleanReplacement)
                 let mode: AssistantApplyMode = selection.isEmpty ? .insertAtCursor : .replaceSelection
                 return (updated, mode)
             }
             // Fallback: try to locate the selected text directly if offsets drifted.
             if !selection.text.isEmpty, let textRange = original.range(of: selection.text) {
-                let updated = original.replacingCharacters(in: textRange, with: replacement)
+                let updated = original.replacingCharacters(in: textRange, with: cleanReplacement)
                 let mode: AssistantApplyMode = selection.isEmpty ? .insertAtCursor : .replaceSelection
                 return (updated, mode)
             }
         }
 
-        // Strategy 2: Try to find similar code block in the original file
-        // This uses line-by-line similarity matching to locate where the code should be applied
-        if let matchRange = findBestMatch(replacement: replacement, in: original, fuzzy: false) {
-            let updated = original.replacingCharacters(in: matchRange, with: replacement)
+        // Strategy 2: Use SmartCodeMatcher for intelligent code matching
+        // This is the primary strategy for finding the correct replacement region
+        let matcher = SmartCodeMatcher()
+        if let matchRange = matcher.findBestReplacementRange(
+            aiOutput: cleanReplacement,
+            originalContent: original
+        ) {
+            let updated = original.replacingCharacters(in: matchRange, with: cleanReplacement)
             return (updated, .replaceMatchedCode)
         }
 
-        // Strategy 3: Try fuzzy matching with normalized whitespace
-        // This handles cases where indentation or spacing differs
-        if let matchRange = findBestMatch(replacement: replacement, in: original, fuzzy: true) {
-            let updated = original.replacingCharacters(in: matchRange, with: replacement)
+        // Strategy 3: Fallback to legacy anchor-based matching (for edge cases)
+        if let matchRange = findBestMatch(replacement: cleanReplacement, in: original, fuzzy: true) {
+            let updated = original.replacingCharacters(in: matchRange, with: cleanReplacement)
             return (updated, .replaceMatchedCode)
         }
 
-        // Strategy 4: Try to find longest common subsequence
-        // This helps when the AI is updating existing code by finding the most similar section
-        if let matchRange = findSimilarCodeBlock(replacement: replacement, in: original) {
-            let updated = original.replacingCharacters(in: matchRange, with: replacement)
-            return (updated, .replaceMatchedCode)
+        // Strategy 4: Empty document - replace entire content
+        if original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (cleanReplacement, .replaceDocument)
         }
 
-        // Strategy 5: Empty document - replace entire content
-        if original.isEmpty {
-            return (replacement, .replaceDocument)
+        // Strategy 5: Fallback - append to document with proper spacing
+        let separator = original.hasSuffix("\n") ? "" : "\n\n"
+        return (original + separator + cleanReplacement, .appendToDocument)
+    }
+    
+    /// Extract clean replacement code from AI output, stripping any SEARCH/REPLACE markers
+    /// if they couldn't be applied properly
+    private func extractCleanReplacement(from text: String) -> String {
+        // If text contains SEARCH/REPLACE blocks, extract just the REPLACE portions
+        let blocks = SearchReplaceBlock.parse(from: text)
+        if !blocks.isEmpty {
+            // Return all REPLACE contents joined
+            return blocks.map(\.replaceText).joined(separator: "\n\n")
         }
-
-        // Strategy 6: Fallback - append to document
-        let separator = original.hasSuffix("\n") ? "" : "\n"
-        return (original + separator + replacement, .appendToDocument)
+        
+        // Check if it's a raw code block (```language ... ```)
+        let codeBlockPattern = #"```\w*\n([\s\S]*?)\n```"#
+        if let regex = try? NSRegularExpression(pattern: codeBlockPattern),
+           let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+           let contentRange = Range(match.range(at: 1), in: text) {
+            return String(text[contentRange])
+        }
+        
+        return text
     }
 
     private func selectionRange(
@@ -482,7 +1377,6 @@ struct CodeAssistantPanel: View {
         in original: String,
         fuzzy: Bool
     ) -> Range<String.Index>? {
-        // Don't try to match if replacement is too short or too long
         let replacementLines = replacement.components(separatedBy: .newlines)
         let originalLines = original.components(separatedBy: .newlines)
 
@@ -490,7 +1384,148 @@ struct CodeAssistantPanel: View {
             return nil
         }
 
-        // For fuzzy matching, normalize whitespace
+        // First try anchor-based matching
+        if let anchorRange = findWithAnchors(replacement: replacement, in: original, fuzzy: fuzzy) {
+            return anchorRange
+        }
+
+        // Fallback to variable window size matching
+        return findWithVariableWindow(replacement: replacement, in: original, fuzzy: fuzzy)
+    }
+    
+    /// Finds matches using leading/trailing anchor lines for precise positioning
+    private func findWithAnchors(
+        replacement: String,
+        in original: String,
+        fuzzy: Bool
+    ) -> Range<String.Index>? {
+        let replacementLines = replacement.components(separatedBy: .newlines)
+        let originalLines = original.components(separatedBy: .newlines)
+        
+        // Detect anchor lines (lines that likely exist unchanged in original)
+        let (leadingAnchors, coreLines, trailingAnchors) = extractAnchors(from: replacementLines, in: originalLines, fuzzy: fuzzy)
+        
+        guard !leadingAnchors.isEmpty || !trailingAnchors.isEmpty else {
+            return nil // No anchors found
+        }
+        
+        // Find anchor positions in original
+        var startLine: Int? = nil
+        var endLine: Int? = nil
+        
+        if !leadingAnchors.isEmpty {
+            startLine = findSequence(leadingAnchors, in: originalLines, fuzzy: fuzzy)
+        }
+        
+        if !trailingAnchors.isEmpty {
+            let trailingStart = findSequence(trailingAnchors, in: originalLines, fuzzy: fuzzy)
+            if let trailingStart = trailingStart {
+                endLine = trailingStart + trailingAnchors.count
+            }
+        }
+        
+        // Calculate replacement range based on anchors
+        if let start = startLine, let end = endLine {
+            let replaceStart = start + leadingAnchors.count
+            let replaceEnd = end - trailingAnchors.count
+            guard replaceStart <= replaceEnd else { return nil }
+            return lineRangeToCharacterRange(lineStart: replaceStart, lineEnd: replaceEnd, in: original)
+        } else if let start = startLine {
+            let replaceStart = start + leadingAnchors.count
+            let replaceEnd = replaceStart + coreLines.count
+            return lineRangeToCharacterRange(lineStart: replaceStart, lineEnd: replaceEnd, in: original)
+        } else if let end = endLine {
+            let replaceEnd = end - trailingAnchors.count
+            let replaceStart = replaceEnd - coreLines.count
+            guard replaceStart >= 0 else { return nil }
+            return lineRangeToCharacterRange(lineStart: replaceStart, lineEnd: replaceEnd, in: original)
+        }
+        
+        return nil
+    }
+    
+    /// Extracts leading anchors, core changes, and trailing anchors from replacement
+    private func extractAnchors(
+        from replacementLines: [String],
+        in originalLines: [String],
+        fuzzy: Bool
+    ) -> (leading: [String], core: [String], trailing: [String]) {
+        let normalize: (String) -> String = { text in
+            fuzzy ? text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            : text
+        }
+        
+        let normalizedReplacement = replacementLines.map(normalize)
+        let normalizedOriginal = originalLines.map(normalize)
+        let originalSet = Set(normalizedOriginal)
+        
+        var leadingAnchors: [String] = []
+        var trailingAnchors: [String] = []
+        
+        // Find leading anchors
+        for line in normalizedReplacement {
+            if originalSet.contains(line) {
+                leadingAnchors.append(line)
+            } else {
+                break
+            }
+        }
+        
+        // Find trailing anchors
+        for line in normalizedReplacement.reversed() {
+            if originalSet.contains(line) && !leadingAnchors.contains(line) {
+                trailingAnchors.insert(line, at: 0)
+            } else {
+                break
+            }
+        }
+        
+        // Extract core lines
+        let coreStart = leadingAnchors.count
+        let coreEnd = replacementLines.count - trailingAnchors.count
+        let coreLines = Array(replacementLines[coreStart..<max(coreStart, coreEnd)])
+        
+        return (leadingAnchors, coreLines, trailingAnchors)
+    }
+    
+    /// Finds a sequence of lines in the original text
+    private func findSequence(
+        _ sequence: [String],
+        in originalLines: [String],
+        fuzzy: Bool
+    ) -> Int? {
+        let normalize: (String) -> String = { text in
+            fuzzy ? text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            : text
+        }
+        
+        let normalizedSequence = sequence.map(normalize)
+        let normalizedOriginal = originalLines.map(normalize)
+        
+        for i in 0...(originalLines.count - sequence.count) {
+            let window = Array(normalizedOriginal[i..<(i + sequence.count)])
+            if window == normalizedSequence {
+                return i
+            }
+        }
+        return nil
+    }
+    
+    /// Variable window size matching for cases without clear anchors
+    private func findWithVariableWindow(
+        replacement: String,
+        in original: String,
+        fuzzy: Bool
+    ) -> Range<String.Index>? {
+        let replacementLines = replacement.components(separatedBy: .newlines)
+        let originalLines = original.components(separatedBy: .newlines)
+        
         let normalize: (String) -> String = { text in
             fuzzy ? text.trimmingCharacters(in: .whitespacesAndNewlines)
                 .components(separatedBy: .whitespacesAndNewlines)
@@ -499,33 +1534,33 @@ struct CodeAssistantPanel: View {
             : text
         }
 
-        // Try to find a sequence of lines that match
         let normalizedReplacementLines = replacementLines.map(normalize)
         let normalizedOriginalLines = originalLines.map(normalize)
 
-        // Search for best matching subsequence using sliding window
         var bestMatchRange: Range<Int>?
         var bestMatchScore = 0
+        
+        // Try different window sizes around the replacement length
+        let baseWindowSize = replacementLines.count
+        for delta in [-2, -1, 0, 1, 2] {
+            let windowSize = max(1, min(originalLines.count, baseWindowSize + delta))
+            
+            for i in 0...(originalLines.count - windowSize) {
+                let windowEnd = i + windowSize
+                let windowLines = Array(normalizedOriginalLines[i..<windowEnd])
 
-        let windowSize = replacementLines.count
-        for i in 0...(originalLines.count - windowSize) {
-            let windowEnd = i + windowSize
-            let windowLines = Array(normalizedOriginalLines[i..<windowEnd])
+                // Calculate token-based match score
+                let matchScore = calculateTokenMatchScore(
+                    window: windowLines,
+                    replacement: normalizedReplacementLines,
+                    fuzzy: fuzzy
+                )
 
-            // Calculate match score (number of matching lines)
-            var matchScore = 0
-            for (index, replacementLine) in normalizedReplacementLines.enumerated() {
-                if windowLines[index] == replacementLine {
-                    matchScore += 1
+                let threshold = fuzzy ? Double(windowSize) * 0.4 : Double(windowSize) * 0.8
+                if matchScore >= threshold && matchScore > Double(bestMatchScore) {
+                    bestMatchScore = Int(matchScore)
+                    bestMatchRange = i..<windowEnd
                 }
-            }
-
-            // For fuzzy matching, we accept partial matches (>50%)
-            // For exact matching, we need 100% match
-            let threshold = fuzzy ? (windowSize / 2) : windowSize
-            if matchScore >= threshold && matchScore > bestMatchScore {
-                bestMatchScore = matchScore
-                bestMatchRange = i..<windowEnd
             }
         }
 
@@ -533,12 +1568,36 @@ struct CodeAssistantPanel: View {
             return nil
         }
 
-        // Convert line range to character range
         return lineRangeToCharacterRange(
             lineStart: matchRange.lowerBound,
             lineEnd: matchRange.upperBound,
             in: original
         )
+    }
+    
+    /// Calculate token-based match score between window and replacement
+    private func calculateTokenMatchScore(
+        window: [String],
+        replacement: [String],
+        fuzzy: Bool
+    ) -> Double {
+        let maxLines = max(window.count, replacement.count)
+        guard maxLines > 0 else { return 0 }
+        
+        var totalScore = 0.0
+        
+        for i in 0..<maxLines {
+            let windowLine = i < window.count ? window[i] : ""
+            let replacementLine = i < replacement.count ? replacement[i] : ""
+            
+            if windowLine == replacementLine && !windowLine.isEmpty {
+                totalScore += 1.0
+            } else if !windowLine.isEmpty && !replacementLine.isEmpty {
+                totalScore += tokenSimilarity(windowLine, replacementLine)
+            }
+        }
+        
+        return totalScore
     }
 
     /// Converts a line range to a character range in the original text
@@ -589,34 +1648,46 @@ struct CodeAssistantPanel: View {
         in original: String
     ) -> Range<String.Index>? {
         let replacementLines = replacement.components(separatedBy: .newlines)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         let originalLines = original.components(separatedBy: .newlines)
 
         // Don't try if replacement is too short or way too long
         guard replacementLines.count >= 2 && replacementLines.count <= originalLines.count else {
             return nil
         }
+        
+        // First try matching by first/last significant lines (strong anchors)
+        if let anchorRange = findBySignificantLines(replacement: replacementLines, in: originalLines) {
+            return lineRangeToCharacterRange(
+                lineStart: anchorRange.lowerBound,
+                lineEnd: anchorRange.upperBound,
+                in: original
+            )
+        }
 
+        // Fallback to similarity-based matching with variable window sizes
         var bestMatchRange: Range<Int>?
         var bestSimilarity: Double = 0.0
-        let minSimilarity: Double = 0.4 // Require at least 40% similarity
+        let minSimilarity: Double = 0.35 // Slightly lower threshold for fallback
 
-        // Slide a window through the original to find the most similar section
-        let windowSize = replacementLines.count
-        for i in 0...(originalLines.count - windowSize) {
-            let windowEnd = i + windowSize
-            let windowLines = Array(originalLines[i..<windowEnd])
-                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        // Try different window sizes to handle additions/deletions
+        let baseWindowSize = replacementLines.count
+        for delta in [-1, 0, 1, 2] {
+            let windowSize = max(1, min(originalLines.count, baseWindowSize + delta))
+            
+            for i in 0...(originalLines.count - windowSize) {
+                let windowEnd = i + windowSize
+                let windowLines = Array(originalLines[i..<windowEnd])
 
-            // Calculate similarity between this window and the replacement
-            let similarity = calculateSimilarity(
-                lines1: windowLines,
-                lines2: replacementLines
-            )
+                // Calculate similarity between this window and the replacement
+                let similarity = calculateSimilarity(
+                    lines1: windowLines,
+                    lines2: replacementLines
+                )
 
-            if similarity > bestSimilarity && similarity >= minSimilarity {
-                bestSimilarity = similarity
-                bestMatchRange = i..<windowEnd
+                if similarity > bestSimilarity && similarity >= minSimilarity {
+                    bestSimilarity = similarity
+                    bestMatchRange = i..<windowEnd
+                }
             }
         }
 
@@ -630,7 +1701,68 @@ struct CodeAssistantPanel: View {
             in: original
         )
     }
+    
+    /// Attempts to find a match by looking for significant first/last lines
+    private func findBySignificantLines(
+        replacement: [String],
+        in originalLines: [String]
+    ) -> Range<Int>? {
+        let nonEmptyReplacement = replacement.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard nonEmptyReplacement.count >= 2 else { return nil }
+        
+        let firstLine = nonEmptyReplacement.first!.trimmingCharacters(in: .whitespaces)
+        let lastLine = nonEmptyReplacement.last!.trimmingCharacters(in: .whitespaces)
+        
+        // Look for function signatures, class declarations, or other significant patterns
+        let isSignificantLine = { (line: String) -> Bool in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.contains("func ") || 
+                   trimmed.contains("class ") || 
+                   trimmed.contains("struct ") || 
+                   trimmed.contains("enum ") || 
+                   trimmed.contains("protocol ") ||
+                   trimmed.contains("extension ") ||
+                   trimmed == "}" || 
+                   trimmed.hasPrefix("import ") ||
+                   trimmed.hasPrefix("@")
+        }
+        
+        if isSignificantLine(firstLine) || isSignificantLine(lastLine) {
+            // Find first line in original
+            for (i, originalLine) in originalLines.enumerated() {
+                let trimmedOriginal = originalLine.trimmingCharacters(in: .whitespaces)
+                if tokenSimilarity(trimmedOriginal, firstLine) > 0.8 {
+                    // Look for matching last line within reasonable distance
+                    let searchEnd = min(originalLines.count, i + replacement.count + 3)
+                    for j in (i + 1)..<searchEnd {
+                        let trimmedEndOriginal = originalLines[j].trimmingCharacters(in: .whitespaces)
+                        if tokenSimilarity(trimmedEndOriginal, lastLine) > 0.8 {
+                            return i..<(j + 1)
+                        }
+                    }
+                    // If we found first line but not last, use replacement length as estimate
+                    let estimatedEnd = min(originalLines.count, i + replacement.count)
+                    return i..<estimatedEnd
+                }
+            }
+        }
+        
+        return nil
+    }
 
+    /// Calculates token-based similarity between two strings (0.0 to 1.0)
+    private func tokenSimilarity(_ s1: String, _ s2: String) -> Double {
+        // Split on non-alphanumeric characters to get tokens (identifiers, keywords, etc.)
+        let tokens1 = Set(s1.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+        let tokens2 = Set(s2.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+        
+        guard !tokens1.isEmpty || !tokens2.isEmpty else { return 0.0 }
+        
+        let intersection = tokens1.intersection(tokens2).count
+        let union = tokens1.union(tokens2).count
+        return union > 0 ? Double(intersection) / Double(union) : 0.0
+    }
+    
     /// Calculates similarity between two sets of code lines (0.0 to 1.0)
     private func calculateSimilarity(lines1: [String], lines2: [String]) -> Double {
         guard lines1.count == lines2.count, lines1.count > 0 else {
@@ -641,23 +1773,14 @@ struct CodeAssistantPanel: View {
 
         for (line1, line2) in zip(lines1, lines2) {
             // Normalize by removing all whitespace for comparison
-            let normalized1 = line1.components(separatedBy: .whitespacesAndNewlines)
-                .joined()
-            let normalized2 = line2.components(separatedBy: .whitespacesAndNewlines)
-                .joined()
+            let normalized1 = line1.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized2 = line2.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // Calculate character-level similarity
             if normalized1 == normalized2 {
                 totalSimilarity += 1.0
             } else if !normalized1.isEmpty && !normalized2.isEmpty {
-                // Use simple character overlap as similarity metric
-                let chars1 = Set(normalized1)
-                let chars2 = Set(normalized2)
-                let intersection = chars1.intersection(chars2).count
-                let union = chars1.union(chars2).count
-                if union > 0 {
-                    totalSimilarity += Double(intersection) / Double(union)
-                }
+                // Use token-based similarity instead of character-level
+                totalSimilarity += tokenSimilarity(normalized1, normalized2)
             }
         }
 
@@ -990,7 +2113,6 @@ private struct CopyableCodeBlock: View {
     var onApply: (String) -> Void = { _ in }
     @EnvironmentObject private var app: MainApp
     @State private var didCopy = false
-    @State private var didInsert = false
     @State private var didQueueApply = false
     private var plainText: String {
         configuration.content
@@ -1010,15 +2132,6 @@ private struct CopyableCodeBlock: View {
                         didQueueApply ? "Ready" : "Apply",
                         systemImage: didQueueApply ? "checkmark.circle.fill"
                             : "doc.text.magnifyingglass")
-                        .labelStyle(.titleAndIcon)
-                }
-                .controlSize(.mini)
-                Button {
-                    insertIntoActiveFile()
-                } label: {
-                    Label(
-                        didInsert ? "Inserted" : "Insert",
-                        systemImage: didInsert ? "checkmark.circle.fill" : "arrow.down.doc")
                         .labelStyle(.titleAndIcon)
                 }
                 .controlSize(.mini)
@@ -1079,27 +2192,6 @@ private struct CopyableCodeBlock: View {
             }
         }
     }
-
-    private func insertIntoActiveFile() {
-        guard app.activeTextEditor != nil else {
-            app.notificationManager.showWarningMessage(
-                "Open a file in the editor to insert code.")
-            return
-        }
-        Task {
-            await app.monacoInstance.insertTextAtCurrentCursor(text: plainText)
-            await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    didInsert = true
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    didInsert = false
-                }
-            }
-        }
-    }
 }
 
 private struct AssistantApplyPreview: Identifiable {
@@ -1132,7 +2224,7 @@ private struct AssistantApplyPreview: Identifiable {
         case .appendToDocument:
             return "Append to current file"
         case .replaceMatchedCode:
-            return "Replace matched code in file"
+            return "Replace automatically detected matching section"
         }
     }
 }
