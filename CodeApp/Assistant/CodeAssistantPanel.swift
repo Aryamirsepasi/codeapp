@@ -23,7 +23,6 @@ struct CodeAssistantPanel: View {
     @State private var showsAttachmentPicker = false
     @State private var showsHistorySheet = false
     @State private var showsModelPicker = false
-    @State private var pendingPreview: AssistantApplyPreview?
 
     private let scrollViewID = "code-assistant-scroll"
 
@@ -60,13 +59,6 @@ struct CodeAssistantPanel: View {
         }
         .sheet(isPresented: $showsModelPicker) {
             ModelSelectionView(viewModel: viewModel)
-        }
-        .sheet(item: $pendingPreview) { preview in
-            AssistantApplyPreviewView(
-                preview: preview,
-                onCancel: { pendingPreview = nil },
-                onApply: { apply(preview: preview) }
-            )
         }
     }
 
@@ -331,358 +323,82 @@ struct CodeAssistantPanel: View {
         }
     }
 
+    /// Shows diff preview using Monaco's built-in diff mode
     private func prepareApplyPreview(snippet: String, languageHint: String?) {
-        guard app.activeTextEditor != nil else {
+        guard let activeFile = app.activeTextEditor else {
             app.notificationManager.showWarningMessage(
                 "Open a file in the editor to apply code.")
             return
         }
         Task {
             let selection = await app.monacoInstance.selectionSnapshot()
-            guard let liveFile = app.activeTextEditor else { return }
-            let liveText = await app.monacoInstance.currentModelValue() ?? liveFile.content
+            let originalText = await app.monacoInstance.currentModelValue() ?? activeFile.content
             let plan = buildUpdatedText(
-                original: liveText,
+                original: originalText,
                 selection: selection,
                 replacement: snippet
             )
-            await MainActor.run {
-                pendingPreview = AssistantApplyPreview(
-                    fileURL: liveFile.url,
-                    originalText: liveText,
-                    updatedText: plan.updated,
-                    mode: plan.mode,
-                    selection: selection,
-                    languageHint: languageHint
-                )
-            }
-        }
-    }
+            let updatedText = plan.updated
 
-    private func apply(preview: AssistantApplyPreview) {
-        Task {
-            guard let activeFile = app.activeTextEditor else {
-                await MainActor.run { pendingPreview = nil }
+            // Check if there are actual changes
+            guard originalText != updatedText else {
                 app.notificationManager.showWarningMessage(
-                    "Open the target file before applying changes.")
+                    "No changes detected. The code may already be applied or couldn't be matched.")
                 return
             }
-            guard activeFile.url == preview.fileURL else {
-                app.notificationManager.showWarningMessage(
-                    "Open \(preview.fileURL.lastPathComponent) to apply these changes.")
-                return
-            }
-            guard (await app.monacoInstance.currentModelValue() ?? activeFile.content)
-                == preview.originalText
-            else {
-                app.notificationManager.showWarningMessage(
-                    "The file changed after this preview was created. Re-open Apply to refresh the diff."
-                )
-                return
-            }
-            await app.monacoInstance.setValueForModel(
-                url: activeFile.url.absoluteString,
-                value: preview.updatedText
+
+            // Switch Monaco to diff mode
+            let originalUrl = "assistant://original/\(activeFile.url.lastPathComponent)"
+            let modifiedUrl = activeFile.url.absoluteString
+            await app.monacoInstance.switchToDiffMode(
+                originalContent: originalText,
+                modifiedContent: updatedText,
+                originalUrl: originalUrl,
+                modifiedUrl: modifiedUrl
             )
-            await MainActor.run { pendingPreview = nil }
+
+            // Show notification with Apply and Cancel buttons
             let app = self.app
+            let fileName = activeFile.url.lastPathComponent
+            let fileUrl = activeFile.url
+
             app.notificationManager.postActionNotification(
-                title: "Assistant changes applied",
+                title: "Preview changes for \(fileName)",
                 level: .info,
                 primary: {
+                    // Apply: set the updated text and exit diff mode
                     Task {
-                        await app.monacoInstance.undo()
+                        await app.monacoInstance.switchToNormalMode()
+                        await app.monacoInstance.setValueForModel(
+                            url: fileUrl.absoluteString,
+                            value: updatedText
+                        )
+                        app.notificationManager.postActionNotification(
+                            title: "Changes applied",
+                            level: .info,
+                            primary: {
+                                Task {
+                                    await app.monacoInstance.undo()
+                                }
+                            },
+                            primaryTitle: "Undo",
+                            source: fileName
+                        )
                     }
                 },
-                primaryTitle: "Undo",
-                source: preview.fileURL.lastPathComponent
+                primaryTitle: "Apply",
+                secondary: {
+                    // Cancel: just exit diff mode
+                    Task {
+                        await app.monacoInstance.switchToNormalMode()
+                    }
+                },
+                secondaryTitle: "Cancel",
+                source: fileName
             )
         }
     }
 
-    // MARK: - Search/Replace Block Parser
-    
-    /// Represents a parsed SEARCH/REPLACE edit block from AI output
-    private struct SearchReplaceBlock {
-        let searchText: String
-        let replaceText: String
-        let language: String?
-        
-        /// Parse all SEARCH/REPLACE blocks from AI-generated code
-        static func parse(from text: String) -> [SearchReplaceBlock] {
-            var blocks: [SearchReplaceBlock] = []
-            
-            // Pattern matches code blocks containing SEARCH/REPLACE format
-            // Supports both fenced code blocks and raw markers
-            let patterns = [
-                // Fenced code block with language: ```swift\n<<<<<<< SEARCH ... >>>>>>> REPLACE\n```
-                #"```(\w*)\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
-                // Fenced code block without language
-                #"```\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
-                // Raw markers (not in code block)
-                #"<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE"#,
-            ]
-            
-            for (index, pattern) in patterns.enumerated() {
-                guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-                    continue
-                }
-                
-                let range = NSRange(text.startIndex..., in: text)
-                let matches = regex.matches(in: text, options: [], range: range)
-                
-                for match in matches {
-                    var language: String? = nil
-                    var searchText: String = ""
-                    var replaceText: String = ""
-                    
-                    if index == 0 {
-                        // Pattern with language identifier
-                        if match.numberOfRanges >= 4 {
-                            if let langRange = Range(match.range(at: 1), in: text) {
-                                let lang = String(text[langRange])
-                                if !lang.isEmpty {
-                                    language = lang
-                                }
-                            }
-                            if let searchRange = Range(match.range(at: 2), in: text) {
-                                searchText = String(text[searchRange])
-                            }
-                            if let replaceRange = Range(match.range(at: 3), in: text) {
-                                replaceText = String(text[replaceRange])
-                            }
-                        }
-                    } else {
-                        // Patterns without language identifier
-                        if match.numberOfRanges >= 3 {
-                            if let searchRange = Range(match.range(at: 1), in: text) {
-                                searchText = String(text[searchRange])
-                            }
-                            if let replaceRange = Range(match.range(at: 2), in: text) {
-                                replaceText = String(text[replaceRange])
-                            }
-                        }
-                    }
-                    
-                    // Only add if we have valid search text
-                    if !searchText.isEmpty {
-                        blocks.append(SearchReplaceBlock(
-                            searchText: searchText,
-                            replaceText: replaceText,
-                            language: language
-                        ))
-                    }
-                }
-            }
-            
-            return blocks
-        }
-        
-        /// Apply this search/replace block to the original text
-        /// Returns the modified text if the search pattern was found, nil otherwise
-        func apply(to original: String) -> String? {
-            // Strategy 1: Exact match
-            if let range = original.range(of: searchText) {
-                return original.replacingCharacters(in: range, with: replaceText)
-            }
-            
-            // Strategy 2: Normalized whitespace match (preserve original indentation style)
-            if let range = findNormalizedMatch(in: original) {
-                return original.replacingCharacters(in: range, with: replaceText)
-            }
-            
-            // Strategy 3: Line-by-line fuzzy match
-            if let range = findFuzzyLineMatch(in: original) {
-                return original.replacingCharacters(in: range, with: replaceText)
-            }
-            
-            return nil
-        }
-        
-        /// Find a match with normalized whitespace (handles tab/space differences)
-        private func findNormalizedMatch(in original: String) -> Range<String.Index>? {
-            let normalizeWhitespace: (String) -> String = { text in
-                text.components(separatedBy: .newlines)
-                    .map { line in
-                        // Normalize leading whitespace to single representation
-                        let stripped = line.trimmingCharacters(in: .whitespaces)
-                        let leadingCount = line.prefix(while: { $0.isWhitespace }).count
-                        return String(repeating: " ", count: leadingCount) + stripped
-                    }
-                    .joined(separator: "\n")
-            }
-            
-            let normalizedOriginal = normalizeWhitespace(original)
-            let normalizedSearch = normalizeWhitespace(searchText)
-            
-            if let normalizedRange = normalizedOriginal.range(of: normalizedSearch) {
-                // Map back to original string indices
-                let startOffset = normalizedOriginal.distance(
-                    from: normalizedOriginal.startIndex,
-                    to: normalizedRange.lowerBound
-                )
-                let endOffset = normalizedOriginal.distance(
-                    from: normalizedOriginal.startIndex,
-                    to: normalizedRange.upperBound
-                )
-                
-                // Find corresponding position in original by counting newlines
-                let originalLines = original.components(separatedBy: .newlines)
-                let normalizedLines = normalizedOriginal.components(separatedBy: .newlines)
-                
-                var normalizedCharCount = 0
-                var originalCharCount = 0
-                var startLineIdx = 0
-                var endLineIdx = 0
-                
-                // Find start line
-                for (idx, line) in normalizedLines.enumerated() {
-                    if normalizedCharCount + line.count >= startOffset {
-                        startLineIdx = idx
-                        break
-                    }
-                    normalizedCharCount += line.count + 1 // +1 for newline
-                }
-                
-                // Find end line
-                normalizedCharCount = 0
-                for (idx, line) in normalizedLines.enumerated() {
-                    normalizedCharCount += line.count + 1
-                    if normalizedCharCount >= endOffset {
-                        endLineIdx = idx
-                        break
-                    }
-                }
-                
-                // Calculate original string range
-                var startCharIdx = 0
-                for i in 0..<startLineIdx {
-                    startCharIdx += originalLines[i].count + 1
-                }
-                
-                var endCharIdx = 0
-                for i in 0...min(endLineIdx, originalLines.count - 1) {
-                    endCharIdx += originalLines[i].count
-                    if i < endLineIdx {
-                        endCharIdx += 1
-                    }
-                }
-                
-                guard startCharIdx <= original.count && endCharIdx <= original.count else {
-                    return nil
-                }
-                
-                let startIndex = original.index(original.startIndex, offsetBy: startCharIdx)
-                let endIndex = original.index(original.startIndex, offsetBy: endCharIdx)
-                
-                return startIndex..<endIndex
-            }
-            
-            return nil
-        }
-        
-        /// Find a fuzzy match based on line-by-line comparison
-        private func findFuzzyLineMatch(in original: String) -> Range<String.Index>? {
-            let searchLines = searchText.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            let originalLines = original.components(separatedBy: .newlines)
-            
-            guard searchLines.count >= 2, originalLines.count >= searchLines.count else {
-                return nil
-            }
-            
-            // Find first matching line with high confidence
-            let firstSearchLine = searchLines[0]
-            var bestStartIdx: Int? = nil
-            var bestScore: Double = 0.7 // Minimum threshold
-            
-            for (idx, originalLine) in originalLines.enumerated() {
-                let trimmed = originalLine.trimmingCharacters(in: .whitespaces)
-                let similarity = tokenSimilarity(firstSearchLine, trimmed)
-                
-                if similarity > bestScore {
-                    // Check if subsequent lines also match
-                    var matchScore = similarity
-                    var matchCount = 1
-                    
-                    for i in 1..<min(searchLines.count, originalLines.count - idx) {
-                        let searchLine = searchLines[i]
-                        let origLine = originalLines[idx + i].trimmingCharacters(in: .whitespaces)
-                        let lineSim = tokenSimilarity(searchLine, origLine)
-                        
-                        if lineSim > 0.6 {
-                            matchScore += lineSim
-                            matchCount += 1
-                        }
-                    }
-                    
-                    let avgScore = matchScore / Double(searchLines.count)
-                    if avgScore > bestScore {
-                        bestScore = avgScore
-                        bestStartIdx = idx
-                    }
-                }
-            }
-            
-            guard let startIdx = bestStartIdx else {
-                return nil
-            }
-            
-            // Find the end index by matching the last few lines
-            let lastSearchLine = searchLines.last!
-            var endIdx = min(startIdx + searchLines.count, originalLines.count)
-            
-            // Refine end position by looking for matching last line
-            for i in (startIdx + 1)..<min(startIdx + searchLines.count + 3, originalLines.count) {
-                let trimmed = originalLines[i].trimmingCharacters(in: .whitespaces)
-                if tokenSimilarity(lastSearchLine, trimmed) > 0.8 {
-                    endIdx = i + 1
-                    break
-                }
-            }
-            
-            // Calculate character range
-            var startOffset = 0
-            for i in 0..<startIdx {
-                startOffset += originalLines[i].count + 1
-            }
-            
-            var endOffset = 0
-            for i in 0..<endIdx {
-                endOffset += originalLines[i].count
-                if i < endIdx - 1 || endIdx < originalLines.count {
-                    endOffset += 1
-                }
-            }
-            
-            guard startOffset < original.count && endOffset <= original.count else {
-                return nil
-            }
-            
-            let startIndex = original.index(original.startIndex, offsetBy: startOffset)
-            let endIndex = original.index(original.startIndex, offsetBy: min(endOffset, original.count))
-            
-            return startIndex..<endIndex
-        }
-        
-        /// Token-based similarity for fuzzy matching
-        private func tokenSimilarity(_ s1: String, _ s2: String) -> Double {
-            if s1 == s2 { return 1.0 }
-            if s1.isEmpty && s2.isEmpty { return 1.0 }
-            if s1.isEmpty || s2.isEmpty { return 0.0 }
-            
-            let tokens1 = Set(s1.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
-            let tokens2 = Set(s2.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
-            
-            guard !tokens1.isEmpty || !tokens2.isEmpty else { return 0.0 }
-            
-            let intersection = tokens1.intersection(tokens2).count
-            let union = tokens1.union(tokens2).count
-            return union > 0 ? Double(intersection) / Double(union) : 0.0
-        }
-    }
-    
     // MARK: - Smart Code Matcher
     
     /// A sophisticated code matcher that uses LCS-based scoring, structural anchor detection,
@@ -879,16 +595,11 @@ struct CodeAssistantPanel: View {
         ) -> Range<String.Index>? {
             // Find opening signature in AI output (first line with function/class definition)
             var openingLineIdx: Int? = nil
-            var closingLineIdx: Int? = nil
-            
+
             for (idx, line) in aiLines.enumerated() {
                 if openingLineIdx == nil && isBlockOpening(line) {
                     openingLineIdx = idx
-                }
-                // Track the last closing brace
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed == "}" || trimmed.hasPrefix("}") {
-                    closingLineIdx = idx
+                    break
                 }
             }
             
@@ -1269,6 +980,7 @@ struct CodeAssistantPanel: View {
         // Strategy 0: Parse SEARCH/REPLACE blocks from AI response (highest priority)
         // This is the most reliable method when AI follows the structured format
         let searchReplaceBlocks = SearchReplaceBlock.parse(from: replacement)
+
         if !searchReplaceBlocks.isEmpty {
             var currentText = original
             var appliedCount = 0
@@ -1340,6 +1052,8 @@ struct CodeAssistantPanel: View {
     private func extractCleanReplacement(from text: String) -> String {
         // If text contains SEARCH/REPLACE blocks, extract just the REPLACE portions
         let blocks = SearchReplaceBlock.parse(from: text)
+
+        // If we have valid blocks, extract replacement content
         if !blocks.isEmpty {
             // Return all REPLACE contents joined
             return blocks.map(\.replaceText).joined(separator: "\n\n")
@@ -1788,6 +1502,300 @@ struct CodeAssistantPanel: View {
     }
 }
 
+// MARK: - Search/Replace Block Parser
+
+/// Represents a parsed SEARCH/REPLACE edit block from AI output
+private struct SearchReplaceBlock: Identifiable {
+    let id = UUID()
+    let searchText: String
+    let replaceText: String
+    let language: String?
+
+    /// Check if this block is valid (has non-empty search and replace text)
+    var isValid: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Get display preview of the change
+    var changePreview: String {
+        let searchPreview = searchText.prefix(80) + (searchText.count > 80 ? "..." : "")
+        let replacePreview = replaceText.prefix(80) + (replaceText.count > 80 ? "..." : "")
+        return "\(searchPreview) → \(replacePreview)"
+    }
+
+    /// Parse all SEARCH/REPLACE blocks from AI-generated code
+    static func parse(from text: String) -> [SearchReplaceBlock] {
+        var blocks: [SearchReplaceBlock] = []
+
+        // Pattern matches code blocks containing SEARCH/REPLACE format
+        // Supports both fenced code blocks and raw markers
+        // Enhanced with alternative formats and better error handling
+        let patterns = [
+            // Fenced code block with language: ```swift\n<<<<<<< SEARCH ... >>>>>>> REPLACE\n```
+            #"```(\w*)\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
+            // Fenced code block without language
+            #"```\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
+            // Raw markers (not in code block)
+            #"<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE"#,
+        ]
+
+        for (index, pattern) in patterns.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+                continue
+            }
+
+            let range = NSRange(text.startIndex..., in: text)
+            let matches = regex.matches(in: text, options: [], range: range)
+
+            for match in matches {
+                var language: String? = nil
+                var searchText: String = ""
+                var replaceText: String = ""
+
+                if index == 0 {
+                    // Pattern with language identifier
+                    if match.numberOfRanges >= 4 {
+                        if let langRange = Range(match.range(at: 1), in: text) {
+                            let lang = String(text[langRange])
+                            if !lang.isEmpty {
+                                language = lang
+                            }
+                        }
+                        if let searchRange = Range(match.range(at: 2), in: text) {
+                            searchText = String(text[searchRange])
+                        }
+                        if let replaceRange = Range(match.range(at: 3), in: text) {
+                            replaceText = String(text[replaceRange])
+                        }
+                    }
+                } else {
+                    // Patterns without language identifier
+                    if match.numberOfRanges >= 3 {
+                        if let searchRange = Range(match.range(at: 1), in: text) {
+                            searchText = String(text[searchRange])
+                        }
+                        if let replaceRange = Range(match.range(at: 2), in: text) {
+                            replaceText = String(text[replaceRange])
+                        }
+                    }
+                }
+
+                // Only add if we have valid search text
+                if !searchText.isEmpty {
+                    blocks.append(SearchReplaceBlock(
+                        searchText: searchText,
+                        replaceText: replaceText,
+                        language: language
+                    ))
+                }
+            }
+        }
+
+        return blocks
+    }
+
+    /// Apply this search/replace block to the original text
+    /// Returns the modified text if the search pattern was found, nil otherwise
+    func apply(to original: String) -> String? {
+        // Strategy 1: Exact match
+        if let range = original.range(of: searchText) {
+            return original.replacingCharacters(in: range, with: replaceText)
+        }
+
+        // Strategy 2: Normalized whitespace match (preserve original indentation style)
+        if let range = findNormalizedMatch(in: original) {
+            return original.replacingCharacters(in: range, with: replaceText)
+        }
+
+        // Strategy 3: Line-by-line fuzzy match
+        if let range = findFuzzyLineMatch(in: original) {
+            return original.replacingCharacters(in: range, with: replaceText)
+        }
+
+        return nil
+    }
+
+    /// Find a match with normalized whitespace (handles tab/space differences)
+    private func findNormalizedMatch(in original: String) -> Range<String.Index>? {
+        let normalizeWhitespace: (String) -> String = { text in
+            text.components(separatedBy: .newlines)
+                .map { line in
+                    // Normalize leading whitespace to single representation
+                    let stripped = line.trimmingCharacters(in: .whitespaces)
+                    let leadingCount = line.prefix(while: { $0.isWhitespace }).count
+                    return String(repeating: " ", count: leadingCount) + stripped
+                }
+                .joined(separator: "\n")
+        }
+
+        let normalizedOriginal = normalizeWhitespace(original)
+        let normalizedSearch = normalizeWhitespace(searchText)
+
+        if let normalizedRange = normalizedOriginal.range(of: normalizedSearch) {
+            // Map back to original string indices
+            let startOffset = normalizedOriginal.distance(
+                from: normalizedOriginal.startIndex,
+                to: normalizedRange.lowerBound
+            )
+            let endOffset = normalizedOriginal.distance(
+                from: normalizedOriginal.startIndex,
+                to: normalizedRange.upperBound
+            )
+
+            // Find corresponding position in original by counting newlines
+            let originalLines = original.components(separatedBy: .newlines)
+            let normalizedLines = normalizedOriginal.components(separatedBy: .newlines)
+
+            var normalizedCharCount = 0
+            var startLineIdx = 0
+            var endLineIdx = 0
+
+            // Find start line
+            for (idx, line) in normalizedLines.enumerated() {
+                if normalizedCharCount + line.count >= startOffset {
+                    startLineIdx = idx
+                    break
+                }
+                normalizedCharCount += line.count + 1 // +1 for newline
+            }
+
+            // Find end line
+            normalizedCharCount = 0
+            for (idx, line) in normalizedLines.enumerated() {
+                normalizedCharCount += line.count + 1
+                if normalizedCharCount >= endOffset {
+                    endLineIdx = idx
+                    break
+                }
+            }
+
+            // Calculate original string range
+            var startCharIdx = 0
+            for i in 0..<startLineIdx {
+                startCharIdx += originalLines[i].count + 1
+            }
+
+            var endCharIdx = 0
+            for i in 0...min(endLineIdx, originalLines.count - 1) {
+                endCharIdx += originalLines[i].count
+                if i < endLineIdx {
+                    endCharIdx += 1
+                }
+            }
+
+            guard startCharIdx <= original.count && endCharIdx <= original.count else {
+                return nil
+            }
+
+            let startIndex = original.index(original.startIndex, offsetBy: startCharIdx)
+            let endIndex = original.index(original.startIndex, offsetBy: endCharIdx)
+
+            return startIndex..<endIndex
+        }
+
+        return nil
+    }
+
+    /// Find a fuzzy match based on line-by-line comparison
+    private func findFuzzyLineMatch(in original: String) -> Range<String.Index>? {
+        let searchLines = searchText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let originalLines = original.components(separatedBy: .newlines)
+
+        guard searchLines.count >= 2, originalLines.count >= searchLines.count else {
+            return nil
+        }
+
+        // Find first matching line with high confidence
+        let firstSearchLine = searchLines[0]
+        var bestStartIdx: Int? = nil
+        var bestScore: Double = 0.7 // Minimum threshold
+
+        for (idx, originalLine) in originalLines.enumerated() {
+            let trimmed = originalLine.trimmingCharacters(in: .whitespaces)
+            let similarity = tokenSimilarity(firstSearchLine, trimmed)
+
+            if similarity > bestScore {
+                // Check if subsequent lines also match
+                var matchScore = similarity
+
+                for i in 1..<min(searchLines.count, originalLines.count - idx) {
+                    let searchLine = searchLines[i]
+                    let origLine = originalLines[idx + i].trimmingCharacters(in: .whitespaces)
+                    let lineSim = tokenSimilarity(searchLine, origLine)
+
+                    if lineSim > 0.6 {
+                        matchScore += lineSim
+                    }
+                }
+
+                let avgScore = matchScore / Double(searchLines.count)
+                if avgScore > bestScore {
+                    bestScore = avgScore
+                    bestStartIdx = idx
+                }
+            }
+        }
+
+        guard let startIdx = bestStartIdx else {
+            return nil
+        }
+
+        // Find the end index by matching the last few lines
+        let lastSearchLine = searchLines.last!
+        var endIdx = min(startIdx + searchLines.count, originalLines.count)
+
+        // Refine end position by looking for matching last line
+        for i in (startIdx + 1)..<min(startIdx + searchLines.count + 3, originalLines.count) {
+            let trimmed = originalLines[i].trimmingCharacters(in: .whitespaces)
+            if tokenSimilarity(lastSearchLine, trimmed) > 0.8 {
+                endIdx = i + 1
+                break
+            }
+        }
+
+        // Calculate character range
+        var startOffset = 0
+        for i in 0..<startIdx {
+            startOffset += originalLines[i].count + 1
+        }
+
+        var endOffset = 0
+        for i in 0..<endIdx {
+            endOffset += originalLines[i].count
+            if i < endIdx - 1 || endIdx < originalLines.count {
+                endOffset += 1
+            }
+        }
+
+        guard startOffset < original.count && endOffset <= original.count else {
+            return nil
+        }
+
+        let startIndex = original.index(original.startIndex, offsetBy: startOffset)
+        let endIndex = original.index(original.startIndex, offsetBy: min(endOffset, original.count))
+
+        return startIndex..<endIndex
+    }
+
+    /// Token-based similarity for fuzzy matching
+    private func tokenSimilarity(_ s1: String, _ s2: String) -> Double {
+        if s1 == s2 { return 1.0 }
+        if s1.isEmpty && s2.isEmpty { return 1.0 }
+        if s1.isEmpty || s2.isEmpty { return 0.0 }
+
+        let tokens1 = Set(s1.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+        let tokens2 = Set(s2.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
+
+        guard !tokens1.isEmpty || !tokens2.isEmpty else { return 0.0 }
+
+        let intersection = tokens1.intersection(tokens2).count
+        let union = tokens1.union(tokens2).count
+        return union > 0 ? Double(intersection) / Double(union) : 0.0
+    }
+}
+
 // MARK: - Model Selection View
 
 private struct ModelSelectionView: View {
@@ -2108,60 +2116,279 @@ private struct HistoryChip: View {
     }
 }
 
+private struct SearchReplaceBlockView: View {
+    let block: SearchReplaceBlock
+    let blockIndex: Int
+    let totalBlocks: Int
+    var onApplyBlock: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Block \(blockIndex + 1) of \(totalBlocks)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let language = block.language {
+                    Text(language.uppercased())
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("SEARCH:")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(block.searchText)
+                    .font(.caption.monospaced())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.red.opacity(0.1))
+                    )
+
+                Text("REPLACE:")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(block.replaceText)
+                    .font(.caption.monospaced())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.green.opacity(0.1))
+                    )
+            }
+
+            HStack(spacing: 8) {
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Apply Block \(blockIndex + 1)", action: onApplyBlock)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+            .padding(.top, 4)
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.tertiarySystemBackground))
+        )
+    }
+}
+
 private struct CopyableCodeBlock: View {
     let configuration: CodeBlockConfiguration
     var onApply: (String) -> Void = { _ in }
     @EnvironmentObject private var app: MainApp
     @State private var didCopy = false
     @State private var didQueueApply = false
+    @State private var appliedBlockIds: Set<UUID> = []
+    @State private var errorBlockIds: [UUID: String] = [:]
     private var plainText: String {
         configuration.content
     }
 
+    private var searchReplaceBlocks: [SearchReplaceBlock] {
+        SearchReplaceBlock.parse(from: plainText)
+    }
+
+    private var hasMultipleBlocks: Bool {
+        searchReplaceBlocks.count > 1
+    }
+
+    private var appliedCount: Int {
+        appliedBlockIds.count
+    }
+
+    private var totalCount: Int {
+        searchReplaceBlocks.count
+    }
+
+    private var allBlocksApplied: Bool {
+        !searchReplaceBlocks.isEmpty && appliedCount == totalCount
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(configuration.language?.uppercased() ?? "CODE")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.secondary)
-                Spacer()
+            headerView
+            Divider()
+            codeContentView
+            multiBlockSectionView
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var headerView: some View {
+        HStack {
+            Text(configuration.language?.uppercased() ?? "CODE")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+            Spacer()
+            headerActionButtons
+            copyButton
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    @ViewBuilder
+    private var headerActionButtons: some View {
+        if hasMultipleBlocks {
+            Menu {
                 Button {
-                    requestApply()
+                    showDiffPreview()
                 } label: {
-                    Label(
-                        didQueueApply ? "Ready" : "Apply",
-                        systemImage: didQueueApply ? "checkmark.circle.fill"
-                            : "doc.text.magnifyingglass")
-                        .labelStyle(.titleAndIcon)
+                    Label("Apply All Blocks", systemImage: "checkmark.circle.fill")
                 }
-                .controlSize(.mini)
                 Button {
                     copyToClipboard(plainText)
                 } label: {
-                    Label(
-                        didCopy ? "Copied" : "Copy",
-                        systemImage: didCopy ? "checkmark.circle.fill" : "doc.on.doc")
-                        .labelStyle(.titleAndIcon)
+                    Label("Copy All", systemImage: "doc.on.doc")
                 }
-                .controlSize(.mini)
+            } label: {
+                Label("Actions", systemImage: "ellipsis.circle")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color(.secondarySystemBackground))
-
-            Divider()
-
-            ScrollView(.horizontal) {
-                configuration.label
-                    .markdownTextStyle {
-                        FontFamilyVariant(.monospaced)
-                        FontSize(.em(0.9))
-                    }
-                    .padding()
+            .menuStyle(.borderlessButton)
+        } else {
+            Button {
+                showDiffPreview()
+            } label: {
+                Label("Apply", systemImage: "doc.text.magnifyingglass")
+                    .labelStyle(.titleAndIcon)
             }
-            .background(Color(.systemBackground))
+            .controlSize(.mini)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var copyButton: some View {
+        Button {
+            copyToClipboard(plainText)
+        } label: {
+            Label(
+                didCopy ? "Copied" : "Copy",
+                systemImage: didCopy ? "checkmark.circle.fill" : "doc.on.doc"
+            )
+            .labelStyle(.titleAndIcon)
+        }
+        .controlSize(.mini)
+    }
+
+    private var codeContentView: some View {
+        ScrollView(.horizontal) {
+            configuration.label
+                .markdownTextStyle {
+                    FontFamilyVariant(.monospaced)
+                    FontSize(.em(0.9))
+                }
+                .padding()
+        }
+        .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private var multiBlockSectionView: some View {
+        if hasMultipleBlocks {
+            Divider()
+            blockListView
+            blockStatusView
+            previewAllButton
+        }
+    }
+
+    private var blockListView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(searchReplaceBlocks.enumerated()), id: \.element.id) { index, block in
+                blockRowView(block: block, index: index)
+            }
+        }
+        .padding(8)
+    }
+
+    private func blockRowView(block: SearchReplaceBlock, index: Int) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                blockStatusHeader(block: block, index: index)
+                Text(block.searchText.prefix(100) + (block.searchText.count > 100 ? "..." : ""))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button {
+                applyBlock(block, at: index)
+            } label: {
+                Text(errorBlockIds[block.id] == nil ? "Apply" : "Retry")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(appliedBlockIds.contains(block.id))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(blockRowBackground(for: block))
+    }
+
+    private func blockStatusHeader(block: SearchReplaceBlock, index: Int) -> some View {
+        HStack {
+            Text("Block \(index + 1)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if appliedBlockIds.contains(block.id) {
+                Text("Applied")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            } else if let error = errorBlockIds[block.id] {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func blockRowBackground(for block: SearchReplaceBlock) -> some View {
+        let backgroundColor: Color
+        if appliedBlockIds.contains(block.id) {
+            backgroundColor = Color.green.opacity(0.1)
+        } else if errorBlockIds[block.id] != nil {
+            backgroundColor = Color.orange.opacity(0.1)
+        } else {
+            backgroundColor = Color(.tertiarySystemBackground)
+        }
+        return RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(backgroundColor)
+    }
+
+    @ViewBuilder
+    private var blockStatusView: some View {
+        if appliedCount > 0 {
+            Text("\(appliedCount) of \(totalCount) blocks applied")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.horizontal, 8)
+        }
+    }
+
+    private var previewAllButton: some View {
+        Button {
+            showDiffPreview()
+        } label: {
+            Label("Preview All Changes", systemImage: "eye")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .frame(maxWidth: .infinity)
     }
 
     private func copyToClipboard(_ text: String) {
@@ -2192,39 +2419,172 @@ private struct CopyableCodeBlock: View {
             }
         }
     }
-}
 
-private struct AssistantApplyPreview: Identifiable {
-    let id = UUID()
-    let fileURL: URL
-    let originalText: String
-    let updatedText: String
-    let mode: AssistantApplyMode
-    let selection: EditorSelectionSnapshot?
-    let languageHint: String?
+    /// Shows the diff preview using Monaco's built-in diff mode
+    private func showDiffPreview() {
+        Task {
+            guard let activeFile = app.activeTextEditor else {
+                app.notificationManager.showWarningMessage(
+                    "Open a file in the editor to preview changes.")
+                return
+            }
 
-    var fileName: String {
-        fileURL.lastPathComponent
+            let selection = await app.monacoInstance.selectionSnapshot()
+            let originalText = await app.monacoInstance.currentModelValue() ?? activeFile.content
+            let updatedText = computeUpdatedText(
+                original: originalText,
+                selection: selection,
+                replacement: plainText
+            )
+
+            // Check if there are actual changes
+            guard originalText != updatedText else {
+                app.notificationManager.showWarningMessage(
+                    "No changes detected. The code may already be applied or couldn't be matched.")
+                return
+            }
+
+            // Switch Monaco to diff mode
+            let originalUrl = "assistant://original/\(activeFile.url.lastPathComponent)"
+            let modifiedUrl = activeFile.url.absoluteString
+            await app.monacoInstance.switchToDiffMode(
+                originalContent: originalText,
+                modifiedContent: updatedText,
+                originalUrl: originalUrl,
+                modifiedUrl: modifiedUrl
+            )
+
+            // Show notification with Apply and Cancel buttons
+            let app = self.app
+            let fileName = activeFile.url.lastPathComponent
+            let fileUrl = activeFile.url
+
+            app.notificationManager.postActionNotification(
+                title: "Preview changes for \(fileName)",
+                level: .info,
+                primary: {
+                    // Apply: set the updated text and exit diff mode
+                    Task {
+                        await app.monacoInstance.switchToNormalMode()
+                        await app.monacoInstance.setValueForModel(
+                            url: fileUrl.absoluteString,
+                            value: updatedText
+                        )
+                        app.notificationManager.postActionNotification(
+                            title: "Changes applied",
+                            level: .info,
+                            primary: {
+                                Task {
+                                    await app.monacoInstance.undo()
+                                }
+                            },
+                            primaryTitle: "Undo",
+                            source: fileName
+                        )
+                    }
+                },
+                primaryTitle: "Apply",
+                secondary: {
+                    // Cancel: just exit diff mode
+                    Task {
+                        await app.monacoInstance.switchToNormalMode()
+                    }
+                },
+                secondaryTitle: "Cancel",
+                source: fileName
+            )
+        }
     }
 
-    var modeDescription: String {
-        switch mode {
-        case .replaceSelection:
-            if let selection {
-                return "Replace selected text (L\(selection.startLine):C\(selection.startColumn) to L\(selection.endLine):C\(selection.endColumn))"
+    /// Computes the updated text by applying code changes
+    private func computeUpdatedText(
+        original: String,
+        selection: EditorSelectionSnapshot?,
+        replacement: String
+    ) -> String {
+        // Strategy 1: Parse and apply SEARCH/REPLACE blocks
+        let blocks = SearchReplaceBlock.parse(from: replacement)
+
+        if !blocks.isEmpty {
+            var currentText = original
+            var appliedCount = 0
+
+            for block in blocks {
+                if let updatedText = block.apply(to: currentText) {
+                    currentText = updatedText
+                    appliedCount += 1
+                }
             }
-            return "Replace selected text"
-        case .insertAtCursor:
-            if let selection {
-                return "Insert at line \(selection.startLine), column \(selection.startColumn)"
+
+            if appliedCount > 0 {
+                return currentText
             }
-            return "Insert at cursor"
-        case .replaceDocument:
-            return "Replace entire file"
-        case .appendToDocument:
-            return "Append to current file"
-        case .replaceMatchedCode:
-            return "Replace automatically detected matching section"
+        }
+
+        // Strategy 2: Use selection if available
+        if let selection = selection, !selection.text.isEmpty {
+            if let range = original.range(of: selection.text) {
+                return original.replacingCharacters(in: range, with: replacement)
+            }
+        }
+
+        // Strategy 3: Empty document - replace entire content
+        if original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return replacement
+        }
+
+        // Strategy 4: Fallback - append to document
+        let separator = original.hasSuffix("\n") ? "" : "\n\n"
+        return original + separator + replacement
+    }
+
+    private func applyBlock(_ block: SearchReplaceBlock, at index: Int) {
+        Task {
+            guard let activeFile = app.activeTextEditor else {
+                await MainActor.run {
+                    app.notificationManager.showWarningMessage(
+                        "Open the target file before applying changes.")
+                }
+                return
+            }
+
+            let liveText = await app.monacoInstance.currentModelValue() ?? activeFile.content
+
+            if let updatedText = block.apply(to: liveText) {
+                await app.monacoInstance.setValueForModel(
+                    url: activeFile.url.absoluteString,
+                    value: updatedText
+                )
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        didQueueApply = true
+                        appliedBlockIds.insert(block.id)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            didQueueApply = false
+                        }
+                    }
+                }
+                let app = self.app
+                app.notificationManager.postActionNotification(
+                    title: "Block \(index + 1) applied",
+                    level: .info,
+                    primary: {
+                        Task {
+                            await app.monacoInstance.undo()
+                        }
+                    },
+                    primaryTitle: "Undo",
+                    source: activeFile.url.lastPathComponent
+                )
+            } else {
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        errorBlockIds[block.id] = "Could not find matching code"
+                    }
+                }
+            }
         }
     }
 }
@@ -2235,202 +2595,6 @@ private enum AssistantApplyMode {
     case replaceDocument
     case appendToDocument
     case replaceMatchedCode  // AI-matched code replacement
-}
-
-private struct AssistantApplyPreviewView: View {
-    let preview: AssistantApplyPreview
-    var onCancel: () -> Void
-    var onApply: () -> Void
-
-    private var diffLines: [DiffLine] {
-        lineDiff(original: preview.originalText, updated: preview.updatedText)
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(preview.fileName, systemImage: "doc.text")
-                        .font(.headline)
-                    Text(preview.modeDescription)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if let selection = preview.selection {
-                        Text("Selection: L\(selection.startLine):C\(selection.startColumn) → L\(selection.endLine):C\(selection.endColumn)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let language = preview.languageHint {
-                        Text(language.uppercased())
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                if diffLines.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "checkmark.seal")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text("No changes detected")
-                            .font(.headline)
-                        Text("The assistant output matches the current file.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    Divider()
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(diffLines) { line in
-                                DiffLineView(line: line)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-            }
-            .padding()
-            .navigationTitle("Preview Changes")
-            .toolbar(content: {
-                SwiftUI.ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
-                }
-                SwiftUI.ToolbarItem(placement: .confirmationAction) {
-                    Button("Apply", action: onApply)
-                        .bold()
-                }
-            })
-        }
-    }
-}
-
-private struct DiffLine: Identifiable {
-    enum ChangeType {
-        case added
-        case removed
-        case unchanged
-    }
-
-    let id = UUID()
-    let type: ChangeType
-    let content: String
-    let oldIndex: Int?
-    let newIndex: Int?
-}
-
-private struct DiffLineView: View {
-    let line: DiffLine
-
-    private var indicator: String {
-        switch line.type {
-        case .added:
-            return "+"
-        case .removed:
-            return "−"
-        case .unchanged:
-            return " "
-        }
-    }
-
-    private var tint: Color {
-        switch line.type {
-        case .added:
-            return .green
-        case .removed:
-            return .red
-        case .unchanged:
-            return Color.secondary
-        }
-    }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(line.oldIndex.map { String($0 + 1) } ?? "")
-                .foregroundStyle(.secondary)
-                .font(.caption2.monospaced())
-                .frame(width: 42, alignment: .trailing)
-            Text(line.newIndex.map { String($0 + 1) } ?? "")
-                .foregroundStyle(.secondary)
-                .font(.caption2.monospaced())
-                .frame(width: 42, alignment: .trailing)
-            Text(indicator)
-                .font(.caption.bold())
-                .foregroundColor(tint)
-                .frame(width: 12, alignment: .leading)
-            Text(line.content)
-                .font(.caption.monospaced())
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(tint.opacity(line.type == .unchanged ? 0.04 : 0.15))
-        )
-    }
-}
-
-private func lineDiff(original: String, updated: String) -> [DiffLine] {
-    // Lightweight LCS-based line diff for preview rendering.
-    let oldLines = original.components(separatedBy: .newlines)
-    let newLines = updated.components(separatedBy: .newlines)
-    let m = oldLines.count
-    let n = newLines.count
-
-    var lcs = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
-    for i in 0..<m {
-        for j in 0..<n {
-            if oldLines[i] == newLines[j] {
-                lcs[i + 1][j + 1] = lcs[i][j] + 1
-            } else {
-                lcs[i + 1][j + 1] = max(lcs[i][j + 1], lcs[i + 1][j])
-            }
-        }
-    }
-
-    var i = m
-    var j = n
-    var diffs: [DiffLine] = []
-
-    while i > 0 || j > 0 {
-        if i > 0 && j > 0 && oldLines[i - 1] == newLines[j - 1] {
-            diffs.append(
-                DiffLine(
-                    type: .unchanged,
-                    content: oldLines[i - 1],
-                    oldIndex: i - 1,
-                    newIndex: j - 1
-                )
-            )
-            i -= 1
-            j -= 1
-        } else if j > 0 && (i == 0 || lcs[i][j - 1] >= lcs[i - 1][j]) {
-            diffs.append(
-                DiffLine(
-                    type: .added,
-                    content: newLines[j - 1],
-                    oldIndex: nil,
-                    newIndex: j - 1
-                )
-            )
-            j -= 1
-        } else if i > 0 {
-            diffs.append(
-                DiffLine(
-                    type: .removed,
-                    content: oldLines[i - 1],
-                    oldIndex: i - 1,
-                    newIndex: nil
-                )
-            )
-            i -= 1
-        }
-    }
-
-    return diffs.reversed()
 }
 
 private struct AttachmentPickerView: View {
