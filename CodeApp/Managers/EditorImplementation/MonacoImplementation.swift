@@ -582,4 +582,160 @@ extension MonacoImplementation: EditorImplementation {
             return []
         }
     }
+
+    // MARK: - Inline Ghost Text Suggestions
+
+    /// Sets up ghost text support in the Monaco editor
+    func setupGhostTextSupport() async {
+        let script = """
+        (function() {
+            if (window._ghostTextDecorations) return; // Already set up
+
+            window._ghostTextDecorations = [];
+            window._ghostTextContent = null;
+
+            // Add CSS for ghost text styling
+            const style = document.createElement('style');
+            style.textContent = `
+                .ghost-text-decoration {
+                    opacity: 0.5;
+                    font-style: italic;
+                }
+                .ghost-text-decoration::after {
+                    color: #888;
+                    content: attr(data-ghost-text);
+                }
+            `;
+            document.head.appendChild(style);
+        })();
+        """
+        _ = try? await monacoWebView.evaluateJavaScriptAsync(script)
+    }
+
+    /// Shows ghost text suggestion at the current cursor position
+    func showGhostText(_ text: String) async {
+        guard let encoded = text.base64Encoded() else { return }
+        let script = """
+        (function() {
+            const ghostText = decodeURIComponent(escape(window.atob('\(encoded)')));
+            window._ghostTextContent = ghostText;
+
+            // Clear existing decorations
+            if (window._ghostTextDecorations && window._ghostTextDecorations.length > 0) {
+                editor.deltaDecorations(window._ghostTextDecorations, []);
+            }
+
+            const position = editor.getPosition();
+            if (!position) return;
+
+            // Create inline decoration with ghost text
+            window._ghostTextDecorations = editor.deltaDecorations([], [{
+                range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
+                options: {
+                    after: {
+                        content: ghostText,
+                        inlineClassName: 'ghost-text-suggestion',
+                        cursorStops: monaco.editor.InjectedTextCursorStops.None
+                    },
+                    inlineClassName: 'ghost-text-decoration'
+                }
+            }]);
+        })();
+        """
+        _ = try? await monacoWebView.evaluateJavaScriptAsync(script)
+    }
+
+    /// Hides the current ghost text suggestion
+    func hideGhostText() async {
+        let script = """
+        (function() {
+            if (window._ghostTextDecorations && window._ghostTextDecorations.length > 0) {
+                editor.deltaDecorations(window._ghostTextDecorations, []);
+                window._ghostTextDecorations = [];
+            }
+            window._ghostTextContent = null;
+        })();
+        """
+        _ = try? await monacoWebView.evaluateJavaScriptAsync(script)
+    }
+
+    /// Accepts the ghost text and inserts it at the cursor
+    func acceptGhostText() async -> Bool {
+        let script = """
+        (function() {
+            if (!window._ghostTextContent) return false;
+
+            const ghostText = window._ghostTextContent;
+
+            // Clear decorations first
+            if (window._ghostTextDecorations && window._ghostTextDecorations.length > 0) {
+                editor.deltaDecorations(window._ghostTextDecorations, []);
+                window._ghostTextDecorations = [];
+            }
+
+            // Insert the text at cursor
+            editor.trigger('keyboard', 'type', { text: ghostText });
+
+            window._ghostTextContent = null;
+            return true;
+        })();
+        """
+        let result = try? await monacoWebView.evaluateJavaScriptAsync(script)
+        return (result as? Bool) ?? false
+    }
+
+    /// Gets the context around the cursor for completion requests
+    func getCompletionContext(contextLines: Int = 10) async -> (prefix: String, suffix: String, languageId: String)? {
+        let script = """
+        (function() {
+            const model = editor.getModel();
+            if (!model) return null;
+
+            const position = editor.getPosition();
+            if (!position) return null;
+
+            const lineNumber = position.lineNumber;
+            const column = position.column;
+
+            // Get prefix (lines before cursor)
+            const startLine = Math.max(1, lineNumber - \(contextLines));
+            const prefixLines = [];
+            for (let i = startLine; i < lineNumber; i++) {
+                prefixLines.push(model.getLineContent(i));
+            }
+            // Add current line up to cursor
+            prefixLines.push(model.getLineContent(lineNumber).substring(0, column - 1));
+            const prefix = prefixLines.join('\\n');
+
+            // Get suffix (rest of current line + lines after cursor)
+            const endLine = Math.min(model.getLineCount(), lineNumber + \(contextLines));
+            const suffixLines = [model.getLineContent(lineNumber).substring(column - 1)];
+            for (let i = lineNumber + 1; i <= endLine; i++) {
+                suffixLines.push(model.getLineContent(i));
+            }
+            const suffix = suffixLines.join('\\n');
+
+            const languageId = model.getLanguageId();
+
+            return { prefix, suffix, languageId };
+        })();
+        """
+        guard
+            let result = try? await monacoWebView.evaluateJavaScriptAsync(script),
+            let dict = result as? [String: String],
+            let prefix = dict["prefix"],
+            let suffix = dict["suffix"],
+            let languageId = dict["languageId"]
+        else {
+            return nil
+        }
+        return (prefix, suffix, languageId)
+    }
+
+    /// Checks if ghost text is currently visible
+    func hasGhostText() async -> Bool {
+        let script = "window._ghostTextContent != null"
+        let result = try? await monacoWebView.evaluateJavaScriptAsync(script)
+        return (result as? Bool) ?? false
+    }
 }

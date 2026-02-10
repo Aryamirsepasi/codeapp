@@ -383,6 +383,8 @@ struct SettingsView: View {
 
 private struct AIAssistantSettingsSection: View {
 
+    @EnvironmentObject var App: MainApp
+
     var body: some View {
         Section(
             content: {
@@ -391,6 +393,18 @@ private struct AIAssistantSettingsSection: View {
                 } label: {
                     Label("AI Assistant API Keys", systemImage: "sparkles")
                         .fontWeight(.medium)
+                }
+
+                Toggle(isOn: Binding(
+                    get: { App.inlineSuggestionService.isEnabled },
+                    set: { App.inlineSuggestionService.isEnabled = $0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Inline Suggestions")
+                        Text("Shows AI completions as ghost text while typing")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             },
             header: { Text("AI Assistant") },

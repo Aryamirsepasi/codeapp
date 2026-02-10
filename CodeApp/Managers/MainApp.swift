@@ -177,6 +177,8 @@ class MainApp: ObservableObject {
     @Published var searchManager = GitHubSearchManager()
     @Published var textSearchManager = TextSearchManager()
     @Published var workSpaceStorage: WorkSpaceStorage
+    @Published private(set) var inlineSuggestionService: InlineSuggestionService
+    @Published private(set) var workspaceIndexer: WorkspaceIndexer
 
     // Editor States
     @Published var problems: [URL: [MonacoEditorMarker]] = [:]
@@ -226,6 +228,15 @@ class MainApp: ObservableObject {
         let rootDir: URL = getRootDirectory()
 
         self.workSpaceStorage = WorkSpaceStorage(url: rootDir)
+        
+        // Initialize main actor-isolated services using MainActor.assumeIsolated
+        // This is safe because MainApp is always created on the main actor
+        self.inlineSuggestionService = MainActor.assumeIsolated {
+            InlineSuggestionService()
+        }
+        self.workspaceIndexer = MainActor.assumeIsolated {
+            WorkspaceIndexer()
+        }
 
         // Use helper to read options before self is fully initialized
         let options = TerminalManager.readTerminalOptionsFromDefaults()
@@ -856,13 +867,13 @@ class MainApp: ObservableObject {
             self.stateManager.gitServiceIsBusy = true
         }
 
-        @Sendable func onFinish() {
+        func onFinish() {
             DispatchQueue.main.async {
                 self.stateManager.gitServiceIsBusy = false
             }
         }
 
-        @Sendable func clearUIState() {
+        func clearUIState() {
             DispatchQueue.main.async {
                 self.aheadBehind = nil
                 self.branch = ""
@@ -1260,6 +1271,12 @@ extension MainApp: EditorImplementationDelegate {
 
             editorShortcuts = await monacoInstance._getMonacoActions()
 
+            // Set up inline suggestion ghost text support
+            if let monaco = monacoInstance as? MonacoImplementation {
+                await monaco.setupGhostTextSupport()
+                inlineSuggestionService.monacoInstance = monaco
+            }
+
             self.stateManager.isMonacoEditorInitialized = true
             await loadURLQueue()
         }
@@ -1291,6 +1308,28 @@ extension MainApp: EditorImplementationDelegate {
         // TODO: This can be made more robust
         activeTextEditor?.currentVersionId = versionID
         activeTextEditor?.content = content
+
+        // Trigger inline suggestions if enabled
+        Task { @MainActor in
+            guard inlineSuggestionService.isEnabled,
+                  let monaco = monacoInstance as? MonacoImplementation else {
+                return
+            }
+
+            // Hide any existing ghost text while typing
+            await monaco.hideGhostText()
+
+            // Get context and trigger completion
+            if let context = await monaco.getCompletionContext() {
+                inlineSuggestionService.onContentChange(
+                    prefix: context.prefix,
+                    suffix: context.suffix,
+                    languageId: context.languageId,
+                    cursorLine: 0,  // Not needed currently
+                    cursorColumn: 0
+                )
+            }
+        }
     }
 
     func editorImplementation(cursorPositionDidChange line: Int, column: Int) {

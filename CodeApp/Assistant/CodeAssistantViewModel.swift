@@ -134,6 +134,11 @@ final class CodeAssistantViewModel: ObservableObject {
         }
     }
     @Published var activeConversationTitle: String = "New Chat"
+    @Published var temperature: Double = 0.2 {
+        didSet {
+            defaults.set(temperature, forKey: Self.temperatureDefaultsKey)
+        }
+    }
 
     /// Optional context about the user's current selection in the editor.
     /// This is populated by the UI layer just before sending a message so the
@@ -156,6 +161,46 @@ final class CodeAssistantViewModel: ObservableObject {
     var canSend: Bool {
         !currentInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !attachments.isEmpty
+    }
+
+    /// Estimated token count for the current input context.
+    /// Uses simple approximation: ~4 characters per token (common heuristic).
+    var estimatedTokenCount: Int {
+        var totalChars = currentInput.count
+        for attachment in attachments {
+            totalChars += attachment.content.count
+        }
+        if let selection = selectionContext {
+            totalChars += selection.text.count
+        }
+        // Add system prompt estimate (~2K tokens)
+        let systemPromptTokens = 2000
+        return (totalChars / 4) + systemPromptTokens
+    }
+
+    /// Token count color category for UI display.
+    enum TokenLevel {
+        case low      // < 4K tokens (green)
+        case medium   // 4K-8K tokens (yellow)
+        case high     // > 8K tokens (red)
+    }
+
+    var tokenLevel: TokenLevel {
+        if estimatedTokenCount < 4000 {
+            return .low
+        } else if estimatedTokenCount < 8000 {
+            return .medium
+        } else {
+            return .high
+        }
+    }
+
+    var formattedTokenCount: String {
+        if estimatedTokenCount >= 1000 {
+            return String(format: "~%.1fK", Double(estimatedTokenCount) / 1000.0)
+        } else {
+            return "~\(estimatedTokenCount)"
+        }
     }
 
     private let defaults: UserDefaults
@@ -265,6 +310,7 @@ final class CodeAssistantViewModel: ObservableObject {
         """
 
     private static let providerDefaultsKey = "codeassistant.provider.active"
+    private static let temperatureDefaultsKey = "codeassistant.temperature"
     private static func modelDefaultsKey(for provider: CodeAssistantProvider) -> String {
         "codeassistant.model.\(provider.rawValue)"
     }
@@ -288,6 +334,11 @@ final class CodeAssistantViewModel: ObservableObject {
             let storedModel = defaults.string(forKey: Self.modelDefaultsKey(for: provider))
             modelOverrides[provider] = storedModel ?? provider.defaultModel
         }
+
+        if defaults.object(forKey: Self.temperatureDefaultsKey) != nil {
+            temperature = defaults.double(forKey: Self.temperatureDefaultsKey)
+        }
+
         loadHistory()
     }
 
@@ -463,7 +514,7 @@ final class CodeAssistantViewModel: ObservableObject {
         let requestBody = OpenAIChatCompletionRequestBody(
             model: model,
             messages: openAIMessages(from: history),
-            temperature: 0.2
+            temperature: temperature
         )
 
         let stream = try await service.streamingChatCompletionRequest(body: requestBody, secondsToWait: 60)
@@ -496,7 +547,7 @@ final class CodeAssistantViewModel: ObservableObject {
         let body = OpenRouterChatCompletionRequestBody(
             messages: openRouterMessages(from: history),
             models: [model],
-            temperature: 0.2
+            temperature: temperature
         )
 
         let stream = try await service.streamingChatCompletionRequest(body: body)
@@ -529,7 +580,8 @@ final class CodeAssistantViewModel: ObservableObject {
         let body = AnthropicMessageRequestBody(
             maxTokens: 1024,
             messages: anthropicMessages(from: history),
-            model: model
+            model: model,
+            temperature: temperature
         )
 
         do {

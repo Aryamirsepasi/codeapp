@@ -148,6 +148,7 @@ private struct MainView: View {
 
     @StateObject private var assistantViewModel = CodeAssistantViewModel()
     @SceneStorage("assistant.panel.width") private var assistantPanelWidth: Double = 360
+    @State private var showsQuickCommand: Bool = false
 
     @AppStorage("changelog.lastread") var changeLogLastReadVersion = "0.0"
     @AppStorage("runeStoneEditorEnabled") var runeStoneEditorEnabled: Bool = false
@@ -279,6 +280,15 @@ private struct MainView: View {
                     }
                 }.padding(.bottom, 30).frame(width: geometry.size.width)
 
+                // Quick Command Overlay (Cmd+K)
+                if showsQuickCommand {
+                    QuickCommandOverlay(
+                        viewModel: assistantViewModel,
+                        isPresented: $showsQuickCommand
+                    )
+                    .environmentObject(App)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                }
             }
         }
         .background(Color.init(id: "sideBar.background").edgesIgnoringSafeArea(.all))
@@ -374,6 +384,11 @@ private struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: .codeAssistantToggleRequested)) { _ in
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 assistantViewModel.isPresented.toggle()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .quickCommandToggleRequested)) { _ in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                showsQuickCommand.toggle()
             }
         }
         .ignoresSafeArea(.container, edges: .bottom)

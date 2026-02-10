@@ -12,7 +12,7 @@ private let EXTENSION_ID = "SOURCE_CONTROL_AUX"
 
 class SourceControlAuxiliaryExtension: CodeAppExtension {
     override func onInitialize(app: MainApp, contribution: CodeAppExtension.Contribution) {
-        let compareWithPreviousitem = ToolbarItem(
+        let compareWithPreviousitem = AppToolbarItem(
             extenionID: EXTENSION_ID,
             icon: "arrow.2.squarepath",
             onClick: { onCompareWithPreviousItemClick(app: app) },
@@ -21,7 +21,7 @@ class SourceControlAuxiliaryExtension: CodeAppExtension {
                     && !(app.activeEditor is DiffTextEditorInstnace) && app.gitTracks.count > 0
             }
         )
-        let previousChangeItem = ToolbarItem(
+        let previousChangeItem = AppToolbarItem(
             extenionID: EXTENSION_ID,
             icon: "arrow.up",
             onClick: {
@@ -33,7 +33,7 @@ class SourceControlAuxiliaryExtension: CodeAppExtension {
                 app.activeEditor is DiffTextEditorInstnace
             }
         )
-        let nextChangeItem = ToolbarItem(
+        let nextChangeItem = AppToolbarItem(
             extenionID: EXTENSION_ID,
             icon: "arrow.down",
             onClick: {

@@ -210,7 +210,7 @@ private struct ToolbarItemView: View {
     @SceneStorage("panel.visible") var showsPanel: Bool = DefaultUIState.PANEL_IS_VISIBLE
     @SceneStorage("panel.focusedId") var currentPanel: String = DefaultUIState.PANEL_FOCUSED_ID
 
-    let item: ToolbarItem
+    let item: AppToolbarItem
 
     var body: some View {
         Button(action: {

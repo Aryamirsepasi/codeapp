@@ -148,6 +148,10 @@ private struct NotificationItemWithButton: View {
     @Binding var isRemoved: Bool
 
     var body: some View {
+        let cancelTitle = NSLocalizedString("common.cancel", comment: "")
+        let usesSecondaryAsCancel = data.secondaryAction != nil
+            && data.secondaryTitle == cancelTitle
+
         NotificationItem(data: data) {
             HStack {
                 if data.secondaryAction == nil {
@@ -180,12 +184,14 @@ private struct NotificationItemWithButton: View {
                                 }
                             }
                     }
-                    Text("common.cancel")
-                        .onTapGesture {
-                            withAnimation {
-                                isRemoved = true
+                    if !usesSecondaryAsCancel {
+                        Text("common.cancel")
+                            .onTapGesture {
+                                withAnimation {
+                                    isRemoved = true
+                                }
                             }
-                        }
+                    }
                 }.foregroundColor(.white)
                     .lineLimit(1)
                     .font(.system(size: 12))

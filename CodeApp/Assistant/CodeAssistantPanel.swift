@@ -23,6 +23,7 @@ struct CodeAssistantPanel: View {
     @State private var showsAttachmentPicker = false
     @State private var showsHistorySheet = false
     @State private var showsModelPicker = false
+    @State private var showsCodebaseSearch = false
 
     private let scrollViewID = "code-assistant-scroll"
 
@@ -60,6 +61,22 @@ struct CodeAssistantPanel: View {
         .sheet(isPresented: $showsModelPicker) {
             ModelSelectionView(viewModel: viewModel)
         }
+        .sheet(isPresented: $showsCodebaseSearch) {
+            NavigationStack {
+                CodebaseSearchView(indexer: app.workspaceIndexer)
+                    .environmentObject(app)
+                    .navigationTitle("Codebase Search")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") {
+                                showsCodebaseSearch = false
+                            }
+                        }
+                    }
+            }
+            .presentationDetents([.large])
+        }
     }
 
     private var header: some View {
@@ -96,6 +113,14 @@ struct CodeAssistantPanel: View {
                 showsHistorySheet = true
             } label: {
                 Label("History", systemImage: "clock.arrow.circlepath")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.bordered)
+
+            Button {
+                showsCodebaseSearch = true
+            } label: {
+                Label("Search", systemImage: "doc.text.magnifyingglass")
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.bordered)
@@ -259,6 +284,17 @@ struct CodeAssistantPanel: View {
                         sendMessageWithEditorSelection()
                     }
                 
+                // Token counter badge
+                Text(viewModel.formattedTokenCount)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(tokenCountColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule()
+                            .fill(tokenCountColor.opacity(0.15))
+                    )
+
                 // Send/Stop button
                 Button {
                     if viewModel.isStreaming {
@@ -276,6 +312,17 @@ struct CodeAssistantPanel: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 12)
+        }
+    }
+
+    private var tokenCountColor: Color {
+        switch viewModel.tokenLevel {
+        case .low:
+            return .green
+        case .medium:
+            return .orange
+        case .high:
+            return .red
         }
     }
 
@@ -368,11 +415,19 @@ struct CodeAssistantPanel: View {
                 primary: {
                     // Apply: set the updated text and exit diff mode
                     Task {
+                        await MainActor.run {
+                            activeFile.content = updatedText
+                            if activeFile.isSaved {
+                                activeFile.currentVersionId += 1
+                            }
+                        }
                         await app.monacoInstance.switchToNormalMode()
                         await app.monacoInstance.setValueForModel(
                             url: fileUrl.absoluteString,
                             value: updatedText
                         )
+                        // Save the file to persist changes to disk
+                        await app.saveCurrentFile()
                         app.notificationManager.postActionNotification(
                             title: "Changes applied",
                             level: .info,
@@ -393,7 +448,7 @@ struct CodeAssistantPanel: View {
                         await app.monacoInstance.switchToNormalMode()
                     }
                 },
-                secondaryTitle: "Cancel",
+                secondaryTitle: "common.cancel",
                 source: fileName
             )
         }
@@ -1815,11 +1870,12 @@ private struct ModelSelectionView: View {
                 providerSection
                 suggestedModelsSection
                 selectionSection
+                temperatureSection
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Select Model")
             .toolbar(content: {
-                SwiftUI.ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
                         applyModel()
                         dismiss()
@@ -1917,6 +1973,36 @@ private struct ModelSelectionView: View {
             } label: {
                 Label("Reset to Default", systemImage: "arrow.counterclockwise")
             }
+        }
+    }
+
+    private var temperatureSection: some View {
+        Section(
+            header: Text("Temperature"),
+            footer: Text("Lower values (0.0-0.3) produce focused, deterministic outputs. Higher values (0.7-1.0) increase creativity and variety.")
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Temperature")
+                    Spacer()
+                    Text(String(format: "%.1f", viewModel.temperature))
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(value: $viewModel.temperature, in: 0.0...1.0, step: 0.1) {
+                    Text("Temperature")
+                } minimumValueLabel: {
+                    Text("0")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } maximumValueLabel: {
+                    Text("1")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 4)
         }
     }
 
@@ -2463,13 +2549,21 @@ private struct CopyableCodeBlock: View {
                 title: "Preview changes for \(fileName)",
                 level: .info,
                 primary: {
-                    // Apply: set the updated text and exit diff mode
+                    // Apply: set the updated text, save, and exit diff mode
                     Task {
+                        await MainActor.run {
+                            activeFile.content = updatedText
+                            if activeFile.isSaved {
+                                activeFile.currentVersionId += 1
+                            }
+                        }
                         await app.monacoInstance.switchToNormalMode()
                         await app.monacoInstance.setValueForModel(
                             url: fileUrl.absoluteString,
                             value: updatedText
                         )
+                        // Save the file to persist changes
+                        await app.saveCurrentFile()
                         app.notificationManager.postActionNotification(
                             title: "Changes applied",
                             level: .info,
@@ -2490,7 +2584,7 @@ private struct CopyableCodeBlock: View {
                         await app.monacoInstance.switchToNormalMode()
                     }
                 },
-                secondaryTitle: "Cancel",
+                secondaryTitle: "common.cancel",
                 source: fileName
             )
         }
@@ -2551,10 +2645,16 @@ private struct CopyableCodeBlock: View {
             let liveText = await app.monacoInstance.currentModelValue() ?? activeFile.content
 
             if let updatedText = block.apply(to: liveText) {
+                // Update the editor's content before setting the model
+                if let activeEditor = app.activeEditor as? TextEditorInstance {
+                    activeEditor.content = updatedText
+                }
                 await app.monacoInstance.setValueForModel(
                     url: activeFile.url.absoluteString,
                     value: updatedText
                 )
+                // Save the file to disk
+                await app.saveCurrentFile()
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         didQueueApply = true
@@ -2609,7 +2709,7 @@ private struct AttachmentPickerView: View {
             }
             .navigationTitle("Select File")
             .toolbar(content: {
-                SwiftUI.ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
                         dismiss()
                     }
@@ -2713,12 +2813,12 @@ private struct ChatHistoryView: View {
             .navigationTitle("Chat History")
             .searchable(text: $searchText, prompt: "Search chats")
             .toolbar(content: {
-                SwiftUI.ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
                         dismiss()
                     }
                 }
-                SwiftUI.ToolbarItem(placement: .confirmationAction) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button {
                         viewModel.startNewConversation()
                         dismiss()
@@ -2726,7 +2826,7 @@ private struct ChatHistoryView: View {
                         Label("New Chat", systemImage: "square.and.pencil")
                     }
                 }
-                SwiftUI.ToolbarItem(placement: .automatic) {
+                ToolbarItem(placement: .automatic) {
                     Menu {
                         Button(role: .destructive) {
                             viewModel.clearHistory()

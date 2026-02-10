@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-struct ToolbarItem: Identifiable {
+struct AppToolbarItem: Identifiable {
     let id = UUID()
     var extenionID: String
     var icon: String
@@ -19,5 +19,5 @@ struct ToolbarItem: Identifiable {
 }
 
 class ToolbarManager: CodeAppContributionPointManager {
-    @Published var items: [ToolbarItem] = []
+    @Published var items: [AppToolbarItem] = []
 }

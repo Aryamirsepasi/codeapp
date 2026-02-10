@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 private let EXTENSION_ID = "LOCAL_EXECUTION"
 
@@ -23,7 +24,7 @@ private let LOCAL_EXECUTION_COMMANDS = [
 
 class LocalExecutionExtension: CodeAppExtension {
     override func onInitialize(app: MainApp, contribution: CodeAppExtension.Contribution) {
-        let toolbarItem = ToolbarItem(
+        let toolbarItem = AppToolbarItem(
             extenionID: EXTENSION_ID,
             icon: "play",
             onClick: {

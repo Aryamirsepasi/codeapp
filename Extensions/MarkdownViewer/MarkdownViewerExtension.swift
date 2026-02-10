@@ -40,7 +40,7 @@ class MarkdownEditorInstance: EditorInstanceWithURL {
 class MarkdownViewerExtension: CodeAppExtension {
 
     override func onInitialize(app: MainApp, contribution: CodeAppExtension.Contribution) {
-        let item = ToolbarItem(
+        let item = AppToolbarItem(
             extenionID: "MARKDOWN",
             icon: "newspaper",
             onClick: {

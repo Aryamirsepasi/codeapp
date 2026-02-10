@@ -17,6 +17,14 @@
 		429FBC782EC2711500E8AD97 /* CodeAssistantConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC712EC2711500E8AD97 /* CodeAssistantConfiguration.swift */; };
 		429FBC792EC2711500E8AD97 /* CodeAssistantViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC732EC2711500E8AD97 /* CodeAssistantViewModel.swift */; };
 		429FBC7A2EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC722EC2711500E8AD97 /* CodeAssistantPanel.swift */; };
+		429FBC7B2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC7C2EC2711500E8AD97 /* CodebaseSearchView.swift */; };
+		429FBC7D2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC7C2EC2711500E8AD97 /* CodebaseSearchView.swift */; };
+		429FBC7E2EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC7F2EC2711500E8AD97 /* InlineSuggestionService.swift */; };
+		429FBC802EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC7F2EC2711500E8AD97 /* InlineSuggestionService.swift */; };
+		429FBC812EC2711500E8AD97 /* QuickCommandOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */; };
+		429FBC832EC2711500E8AD97 /* QuickCommandOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */; };
+		429FBC842EC2711500E8AD97 /* WorkspaceIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */; };
+		429FBC862EC2711500E8AD97 /* WorkspaceIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */; };
 		42DFBA4A2EC37158009D2E88 /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA492EC37158009D2E88 /* MLXEmbedders */; };
 		42DFBA4C2EC37158009D2E88 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA4B2EC37158009D2E88 /* MLXLLM */; };
 		42DFBA4E2EC37158009D2E88 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA4D2EC37158009D2E88 /* MLXLMCommon */; };
@@ -1431,6 +1439,10 @@
 		429FBC712EC2711500E8AD97 /* CodeAssistantConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAssistantConfiguration.swift; sourceTree = "<group>"; };
 		429FBC722EC2711500E8AD97 /* CodeAssistantPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAssistantPanel.swift; sourceTree = "<group>"; };
 		429FBC732EC2711500E8AD97 /* CodeAssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAssistantViewModel.swift; sourceTree = "<group>"; };
+		429FBC7C2EC2711500E8AD97 /* CodebaseSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodebaseSearchView.swift; sourceTree = "<group>"; };
+		429FBC7F2EC2711500E8AD97 /* InlineSuggestionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSuggestionService.swift; sourceTree = "<group>"; };
+		429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickCommandOverlay.swift; sourceTree = "<group>"; };
+		429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceIndexer.swift; sourceTree = "<group>"; };
 		42F204F72EC2154300FCE150 /* AIAssistantExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIAssistantExtension.swift; sourceTree = "<group>"; };
 		4F30816829662CBF002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4F30816929662D58002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -2228,6 +2240,10 @@
 				429FBC712EC2711500E8AD97 /* CodeAssistantConfiguration.swift */,
 				429FBC722EC2711500E8AD97 /* CodeAssistantPanel.swift */,
 				429FBC732EC2711500E8AD97 /* CodeAssistantViewModel.swift */,
+				429FBC7C2EC2711500E8AD97 /* CodebaseSearchView.swift */,
+				429FBC7F2EC2711500E8AD97 /* InlineSuggestionService.swift */,
+				429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */,
+				429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */,
 			);
 			path = Assistant;
 			sourceTree = "<group>";
@@ -3761,6 +3777,10 @@
 				429FBC782EC2711500E8AD97 /* CodeAssistantConfiguration.swift in Sources */,
 				429FBC792EC2711500E8AD97 /* CodeAssistantViewModel.swift in Sources */,
 				429FBC7A2EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */,
+				429FBC7D2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */,
+				429FBC802EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */,
+				429FBC832EC2711500E8AD97 /* QuickCommandOverlay.swift in Sources */,
+				429FBC862EC2711500E8AD97 /* WorkspaceIndexer.swift in Sources */,
 				949D788B2C33DC3F006D7480 /* AppExtensionError.swift in Sources */,
 				94A045EF280480E800182275 /* RemoteListSection.swift in Sources */,
 				9419696D280316C7008AAEB2 /* DirectoryFolderMonitor.swift in Sources */,
@@ -3959,6 +3979,10 @@
 				429FBC752EC2711500E8AD97 /* CodeAssistantConfiguration.swift in Sources */,
 				429FBC762EC2711500E8AD97 /* CodeAssistantViewModel.swift in Sources */,
 				429FBC772EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */,
+				429FBC7B2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */,
+				429FBC7E2EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */,
+				429FBC812EC2711500E8AD97 /* QuickCommandOverlay.swift in Sources */,
+				429FBC842EC2711500E8AD97 /* WorkspaceIndexer.swift in Sources */,
 				949D788A2C33DC3F006D7480 /* AppExtensionError.swift in Sources */,
 				94A045EE280480E800182275 /* RemoteListSection.swift in Sources */,
 				94A777A8257ABEBE008FE7B2 /* DirectoryFolderMonitor.swift in Sources */,

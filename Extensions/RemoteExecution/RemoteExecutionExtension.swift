@@ -24,7 +24,7 @@ class RemoteExecutionExtension: CodeAppExtension {
         )
         contribution.panel.registerPanel(panel: panel)
 
-        let toolbarItem = ToolbarItem(
+        let toolbarItem = AppToolbarItem(
             extenionID: EXTENSION_ID,
             icon: "server.rack",
             secondaryIcon: "play.circle.fill",

@@ -24,7 +24,7 @@ class SimpleWebPreviewExtension: CodeAppExtension {
             self.onWorkSpaceStorageChanged(newUrl: url)
         }
 
-        let toolbarItem = ToolbarItem(
+        let toolbarItem = AppToolbarItem(
             extenionID: "WEB_PREVIEW",
             icon: "safari",
             onClick: {
