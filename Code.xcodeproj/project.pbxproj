@@ -25,6 +25,14 @@
 		429FBC832EC2711500E8AD97 /* QuickCommandOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */; };
 		429FBC842EC2711500E8AD97 /* WorkspaceIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */; };
 		429FBC862EC2711500E8AD97 /* WorkspaceIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */; };
+		935FD6AEA5417BFC6D62E824 /* AgentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = F359BB89103BEF251ECE3056 /* AgentContext.swift */; };
+		F2B0B60F2D941B49CD0AC272 /* AgentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = F359BB89103BEF251ECE3056 /* AgentContext.swift */; };
+		0A5911634BBEAE9991E99D84 /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A06A077FDEA46158A8AA02A /* AgentSession.swift */; };
+		5F40A435377DC859235CD569 /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A06A077FDEA46158A8AA02A /* AgentSession.swift */; };
+		E29A60A8B75FE0B5C7221335 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D069B4CE55069AD5021AAE4 /* AgentTools.swift */; };
+		673266BE8647DAD8CBBF06D1 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D069B4CE55069AD5021AAE4 /* AgentTools.swift */; };
+		624D2FD9C89858B781D32DA6 /* SearchReplaceBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */; };
+		79A8B16D98359838910B14CC /* SearchReplaceBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */; };
 		42DFBA4A2EC37158009D2E88 /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA492EC37158009D2E88 /* MLXEmbedders */; };
 		42DFBA4C2EC37158009D2E88 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA4B2EC37158009D2E88 /* MLXLLM */; };
 		42DFBA4E2EC37158009D2E88 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA4D2EC37158009D2E88 /* MLXLMCommon */; };
@@ -1443,6 +1451,10 @@
 		429FBC7F2EC2711500E8AD97 /* InlineSuggestionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSuggestionService.swift; sourceTree = "<group>"; };
 		429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickCommandOverlay.swift; sourceTree = "<group>"; };
 		429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceIndexer.swift; sourceTree = "<group>"; };
+		F359BB89103BEF251ECE3056 /* AgentContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentContext.swift; sourceTree = "<group>"; };
+		2A06A077FDEA46158A8AA02A /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
+		0D069B4CE55069AD5021AAE4 /* AgentTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTools.swift; sourceTree = "<group>"; };
+		D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchReplaceBlock.swift; sourceTree = "<group>"; };
 		42F204F72EC2154300FCE150 /* AIAssistantExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIAssistantExtension.swift; sourceTree = "<group>"; };
 		4F30816829662CBF002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4F30816929662D58002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -2244,6 +2256,10 @@
 				429FBC7F2EC2711500E8AD97 /* InlineSuggestionService.swift */,
 				429FBC822EC2711500E8AD97 /* QuickCommandOverlay.swift */,
 				429FBC852EC2711500E8AD97 /* WorkspaceIndexer.swift */,
+				F359BB89103BEF251ECE3056 /* AgentContext.swift */,
+				2A06A077FDEA46158A8AA02A /* AgentSession.swift */,
+				0D069B4CE55069AD5021AAE4 /* AgentTools.swift */,
+				D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */,
 			);
 			path = Assistant;
 			sourceTree = "<group>";
@@ -3776,6 +3792,10 @@
 				9419696C280316C7008AAEB2 /* WorkSpaceStorage.swift in Sources */,
 				429FBC782EC2711500E8AD97 /* CodeAssistantConfiguration.swift in Sources */,
 				429FBC792EC2711500E8AD97 /* CodeAssistantViewModel.swift in Sources */,
+				935FD6AEA5417BFC6D62E824 /* AgentContext.swift in Sources */,
+				0A5911634BBEAE9991E99D84 /* AgentSession.swift in Sources */,
+				E29A60A8B75FE0B5C7221335 /* AgentTools.swift in Sources */,
+				624D2FD9C89858B781D32DA6 /* SearchReplaceBlock.swift in Sources */,
 				429FBC7A2EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */,
 				429FBC7D2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */,
 				429FBC802EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */,
@@ -3978,6 +3998,10 @@
 				94A777A2257ABDC3008FE7B2 /* WorkSpaceStorage.swift in Sources */,
 				429FBC752EC2711500E8AD97 /* CodeAssistantConfiguration.swift in Sources */,
 				429FBC762EC2711500E8AD97 /* CodeAssistantViewModel.swift in Sources */,
+				F2B0B60F2D941B49CD0AC272 /* AgentContext.swift in Sources */,
+				5F40A435377DC859235CD569 /* AgentSession.swift in Sources */,
+				673266BE8647DAD8CBBF06D1 /* AgentTools.swift in Sources */,
+				79A8B16D98359838910B14CC /* SearchReplaceBlock.swift in Sources */,
 				429FBC772EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */,
 				429FBC7B2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */,
 				429FBC7E2EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */,

@@ -81,59 +81,69 @@ struct CodeAssistantPanel: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            // Title with streaming indicator
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Code Assistant")
-                    .font(.headline)
-                
-                HStack(spacing: 6) {
-                    if viewModel.isStreaming {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
+            // Left: compact title with optional streaming indicator
+            HStack(spacing: 6) {
+                if viewModel.isStreaming {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                VStack(alignment: .leading, spacing: 1) {
                     Text(viewModel.activeConversationTitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.headline)
                         .lineLimit(1)
+                    Text(viewModel.currentModel)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
-            
+
             Spacer()
-            
-            // Essential header actions
+
+            // Right: New Chat + overflow Menu
             Button {
                 viewModel.startNewConversation()
             } label: {
-                Label("New Chat", systemImage: "square.and.pencil")
+                Image(systemName: "square.and.pencil")
             }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
-            
-            Button {
-                showsHistorySheet = true
-            } label: {
-                Label("History", systemImage: "clock.arrow.circlepath")
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderless)
 
-            Button {
-                showsCodebaseSearch = true
-            } label: {
-                Label("Search", systemImage: "doc.text.magnifyingglass")
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
+            Menu {
+                Toggle(isOn: $viewModel.isAgentMode) {
+                    Label(
+                        viewModel.isAgentMode ? "Agent Mode" : "Chat Mode",
+                        systemImage: viewModel.isAgentMode ? "cpu" : "bubble.left.and.bubble.right"
+                    )
+                }
 
-            Button {
-                showsModelPicker = true
+                Divider()
+
+                Button {
+                    showsHistorySheet = true
+                } label: {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                }
+
+                Button {
+                    showsCodebaseSearch = true
+                } label: {
+                    Label("Codebase Search", systemImage: "doc.text.magnifyingglass")
+                }
+
+                Divider()
+
+                Button {
+                    showsModelPicker = true
+                } label: {
+                    Label("Model: \(viewModel.currentModel)", systemImage: "brain")
+                }
             } label: {
-                Label("Model", systemImage: "brain")
+                Image(systemName: "ellipsis.circle")
+                    .font(.body)
             }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderless)
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.vertical, 10)
     }
 
     private var messagesView: some View {
@@ -144,12 +154,26 @@ struct CodeAssistantPanel: View {
                 } else {
                     LazyVStack(spacing: 12) {
                         ForEach(viewModel.messages) { message in
-                            MessageBubbleView(
-                                message: message,
-                                onApply: { snippet, languageHint in
-                                    prepareApplyPreview(snippet: snippet, languageHint: languageHint)
+                            VStack(spacing: 0) {
+                                // Show tool activities above the last assistant message
+                                if message.role == .assistant
+                                    && message.id == viewModel.messages.last?.id
+                                    && !viewModel.currentToolActivities.isEmpty
+                                {
+                                    ToolActivityView(
+                                        activities: viewModel.currentToolActivities
+                                    )
+                                    .padding(.bottom, 4)
                                 }
-                            )
+
+                                MessageBubbleView(
+                                    message: message,
+                                    onApply: { snippet, languageHint in
+                                        prepareApplyPreview(
+                                            snippet: snippet, languageHint: languageHint)
+                                    }
+                                )
+                            }
                         }
                         Color.clear
                             .frame(height: 1)
@@ -166,6 +190,13 @@ struct CodeAssistantPanel: View {
                 }
             }
             .onChange(of: viewModel.messages.last?.body ?? "") {
+                if viewModel.isStreaming {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(scrollViewID, anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: viewModel.currentToolActivities.count) {
                 if viewModel.isStreaming {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(scrollViewID, anchor: .bottom)
@@ -1560,294 +1591,90 @@ struct CodeAssistantPanel: View {
 // MARK: - Search/Replace Block Parser
 
 /// Represents a parsed SEARCH/REPLACE edit block from AI output
-private struct SearchReplaceBlock: Identifiable {
-    let id = UUID()
-    let searchText: String
-    let replaceText: String
-    let language: String?
+// SearchReplaceBlock is now defined in SearchReplaceBlock.swift
 
-    /// Check if this block is valid (has non-empty search and replace text)
-    var isValid: Bool {
-        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+// SearchReplaceBlock has been extracted to SearchReplaceBlock.swift for reuse by agent tools.
 
-    /// Get display preview of the change
-    var changePreview: String {
-        let searchPreview = searchText.prefix(80) + (searchText.count > 80 ? "..." : "")
-        let replacePreview = replaceText.prefix(80) + (replaceText.count > 80 ? "..." : "")
-        return "\(searchPreview) → \(replacePreview)"
-    }
+// MARK: - Tool Activity View
 
-    /// Parse all SEARCH/REPLACE blocks from AI-generated code
-    static func parse(from text: String) -> [SearchReplaceBlock] {
-        var blocks: [SearchReplaceBlock] = []
+struct ToolActivityView: View {
+    let activities: [ToolActivity]
 
-        // Pattern matches code blocks containing SEARCH/REPLACE format
-        // Supports both fenced code blocks and raw markers
-        // Enhanced with alternative formats and better error handling
-        let patterns = [
-            // Fenced code block with language: ```swift\n<<<<<<< SEARCH ... >>>>>>> REPLACE\n```
-            #"```(\w*)\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
-            // Fenced code block without language
-            #"```\n<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE\n```"#,
-            // Raw markers (not in code block)
-            #"<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE"#,
-        ]
-
-        for (index, pattern) in patterns.enumerated() {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-                continue
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(activities) { activity in
+                ToolActivityRow(activity: activity)
             }
+        }
+        .padding(.horizontal, 12)
+    }
+}
 
-            let range = NSRange(text.startIndex..., in: text)
-            let matches = regex.matches(in: text, options: [], range: range)
+private struct ToolActivityRow: View {
+    let activity: ToolActivity
+    @State private var isExpanded = false
 
-            for match in matches {
-                var language: String? = nil
-                var searchText: String = ""
-                var replaceText: String = ""
-
-                if index == 0 {
-                    // Pattern with language identifier
-                    if match.numberOfRanges >= 4 {
-                        if let langRange = Range(match.range(at: 1), in: text) {
-                            let lang = String(text[langRange])
-                            if !lang.isEmpty {
-                                language = lang
-                            }
-                        }
-                        if let searchRange = Range(match.range(at: 2), in: text) {
-                            searchText = String(text[searchRange])
-                        }
-                        if let replaceRange = Range(match.range(at: 3), in: text) {
-                            replaceText = String(text[replaceRange])
-                        }
-                    }
-                } else {
-                    // Patterns without language identifier
-                    if match.numberOfRanges >= 3 {
-                        if let searchRange = Range(match.range(at: 1), in: text) {
-                            searchText = String(text[searchRange])
-                        }
-                        if let replaceRange = Range(match.range(at: 2), in: text) {
-                            replaceText = String(text[replaceRange])
-                        }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button {
+                if activity.resultPreview != nil {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isExpanded.toggle()
                     }
                 }
+            } label: {
+                HStack(spacing: 6) {
+                    statusIcon
+                        .frame(width: 14, height: 14)
 
-                // Only add if we have valid search text
-                if !searchText.isEmpty {
-                    blocks.append(SearchReplaceBlock(
-                        searchText: searchText,
-                        replaceText: replaceText,
-                        language: language
-                    ))
-                }
-            }
-        }
+                    Text(activity.summary)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
 
-        return blocks
-    }
+                    Spacer()
 
-    /// Apply this search/replace block to the original text
-    /// Returns the modified text if the search pattern was found, nil otherwise
-    func apply(to original: String) -> String? {
-        // Strategy 1: Exact match
-        if let range = original.range(of: searchText) {
-            return original.replacingCharacters(in: range, with: replaceText)
-        }
-
-        // Strategy 2: Normalized whitespace match (preserve original indentation style)
-        if let range = findNormalizedMatch(in: original) {
-            return original.replacingCharacters(in: range, with: replaceText)
-        }
-
-        // Strategy 3: Line-by-line fuzzy match
-        if let range = findFuzzyLineMatch(in: original) {
-            return original.replacingCharacters(in: range, with: replaceText)
-        }
-
-        return nil
-    }
-
-    /// Find a match with normalized whitespace (handles tab/space differences)
-    private func findNormalizedMatch(in original: String) -> Range<String.Index>? {
-        let normalizeWhitespace: (String) -> String = { text in
-            text.components(separatedBy: .newlines)
-                .map { line in
-                    // Normalize leading whitespace to single representation
-                    let stripped = line.trimmingCharacters(in: .whitespaces)
-                    let leadingCount = line.prefix(while: { $0.isWhitespace }).count
-                    return String(repeating: " ", count: leadingCount) + stripped
-                }
-                .joined(separator: "\n")
-        }
-
-        let normalizedOriginal = normalizeWhitespace(original)
-        let normalizedSearch = normalizeWhitespace(searchText)
-
-        if let normalizedRange = normalizedOriginal.range(of: normalizedSearch) {
-            // Map back to original string indices
-            let startOffset = normalizedOriginal.distance(
-                from: normalizedOriginal.startIndex,
-                to: normalizedRange.lowerBound
-            )
-            let endOffset = normalizedOriginal.distance(
-                from: normalizedOriginal.startIndex,
-                to: normalizedRange.upperBound
-            )
-
-            // Find corresponding position in original by counting newlines
-            let originalLines = original.components(separatedBy: .newlines)
-            let normalizedLines = normalizedOriginal.components(separatedBy: .newlines)
-
-            var normalizedCharCount = 0
-            var startLineIdx = 0
-            var endLineIdx = 0
-
-            // Find start line
-            for (idx, line) in normalizedLines.enumerated() {
-                if normalizedCharCount + line.count >= startOffset {
-                    startLineIdx = idx
-                    break
-                }
-                normalizedCharCount += line.count + 1 // +1 for newline
-            }
-
-            // Find end line
-            normalizedCharCount = 0
-            for (idx, line) in normalizedLines.enumerated() {
-                normalizedCharCount += line.count + 1
-                if normalizedCharCount >= endOffset {
-                    endLineIdx = idx
-                    break
-                }
-            }
-
-            // Calculate original string range
-            var startCharIdx = 0
-            for i in 0..<startLineIdx {
-                startCharIdx += originalLines[i].count + 1
-            }
-
-            var endCharIdx = 0
-            for i in 0...min(endLineIdx, originalLines.count - 1) {
-                endCharIdx += originalLines[i].count
-                if i < endLineIdx {
-                    endCharIdx += 1
-                }
-            }
-
-            guard startCharIdx <= original.count && endCharIdx <= original.count else {
-                return nil
-            }
-
-            let startIndex = original.index(original.startIndex, offsetBy: startCharIdx)
-            let endIndex = original.index(original.startIndex, offsetBy: endCharIdx)
-
-            return startIndex..<endIndex
-        }
-
-        return nil
-    }
-
-    /// Find a fuzzy match based on line-by-line comparison
-    private func findFuzzyLineMatch(in original: String) -> Range<String.Index>? {
-        let searchLines = searchText.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        let originalLines = original.components(separatedBy: .newlines)
-
-        guard searchLines.count >= 2, originalLines.count >= searchLines.count else {
-            return nil
-        }
-
-        // Find first matching line with high confidence
-        let firstSearchLine = searchLines[0]
-        var bestStartIdx: Int? = nil
-        var bestScore: Double = 0.7 // Minimum threshold
-
-        for (idx, originalLine) in originalLines.enumerated() {
-            let trimmed = originalLine.trimmingCharacters(in: .whitespaces)
-            let similarity = tokenSimilarity(firstSearchLine, trimmed)
-
-            if similarity > bestScore {
-                // Check if subsequent lines also match
-                var matchScore = similarity
-
-                for i in 1..<min(searchLines.count, originalLines.count - idx) {
-                    let searchLine = searchLines[i]
-                    let origLine = originalLines[idx + i].trimmingCharacters(in: .whitespaces)
-                    let lineSim = tokenSimilarity(searchLine, origLine)
-
-                    if lineSim > 0.6 {
-                        matchScore += lineSim
+                    if activity.resultPreview != nil {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                 }
+            }
+            .buttonStyle(.plain)
 
-                let avgScore = matchScore / Double(searchLines.count)
-                if avgScore > bestScore {
-                    bestScore = avgScore
-                    bestStartIdx = idx
-                }
+            if isExpanded, let preview = activity.resultPreview {
+                Text(preview)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(6)
+                    .padding(.leading, 20)
+                    .padding(.top, 2)
             }
         }
-
-        guard let startIdx = bestStartIdx else {
-            return nil
-        }
-
-        // Find the end index by matching the last few lines
-        let lastSearchLine = searchLines.last!
-        var endIdx = min(startIdx + searchLines.count, originalLines.count)
-
-        // Refine end position by looking for matching last line
-        for i in (startIdx + 1)..<min(startIdx + searchLines.count + 3, originalLines.count) {
-            let trimmed = originalLines[i].trimmingCharacters(in: .whitespaces)
-            if tokenSimilarity(lastSearchLine, trimmed) > 0.8 {
-                endIdx = i + 1
-                break
-            }
-        }
-
-        // Calculate character range
-        var startOffset = 0
-        for i in 0..<startIdx {
-            startOffset += originalLines[i].count + 1
-        }
-
-        var endOffset = 0
-        for i in 0..<endIdx {
-            endOffset += originalLines[i].count
-            if i < endIdx - 1 || endIdx < originalLines.count {
-                endOffset += 1
-            }
-        }
-
-        guard startOffset < original.count && endOffset <= original.count else {
-            return nil
-        }
-
-        let startIndex = original.index(original.startIndex, offsetBy: startOffset)
-        let endIndex = original.index(original.startIndex, offsetBy: min(endOffset, original.count))
-
-        return startIndex..<endIndex
+        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(.tertiarySystemBackground))
+        )
     }
 
-    /// Token-based similarity for fuzzy matching
-    private func tokenSimilarity(_ s1: String, _ s2: String) -> Double {
-        if s1 == s2 { return 1.0 }
-        if s1.isEmpty && s2.isEmpty { return 1.0 }
-        if s1.isEmpty || s2.isEmpty { return 0.0 }
-
-        let tokens1 = Set(s1.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
-        let tokens2 = Set(s2.split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "_" }))
-
-        guard !tokens1.isEmpty || !tokens2.isEmpty else { return 0.0 }
-
-        let intersection = tokens1.intersection(tokens2).count
-        let union = tokens1.union(tokens2).count
-        return union > 0 ? Double(intersection) / Double(union) : 0.0
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch activity.status {
+        case .running:
+            ProgressView()
+                .controlSize(.mini)
+        case .completed:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.red)
+        }
     }
 }
 

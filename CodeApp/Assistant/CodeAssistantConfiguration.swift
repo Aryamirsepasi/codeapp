@@ -52,7 +52,7 @@ enum CodeAssistantProvider: String, CaseIterable, Identifiable {
         case .openAI:
             return "gpt-5"
         case .anthropic:
-            return "claude-sonnet-4-5"
+            return "claude-sonnet-4-6"
         case .openRouter:
             return "deepseek/deepseek-r1"
         }
@@ -64,9 +64,9 @@ enum CodeAssistantProvider: String, CaseIterable, Identifiable {
             return ["gpt-5", "gpt-5-mini", "gpt-4.1"]
         case .anthropic:
             return [
-                "claude-sonnet-4-5",
+                "claude-sonnet-4-6",
                 "claude-haiku-4-5",
-                "claude-opus-4-1",
+                "claude-opus-4-6",
             ]
         case .openRouter:
             return [

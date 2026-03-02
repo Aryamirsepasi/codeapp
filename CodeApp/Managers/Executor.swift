@@ -287,6 +287,58 @@ class Executor {
     }
 }
 
+// MARK: - Async Wrapper for Agent Tools
+
+extension Executor {
+    /// Run a shell command asynchronously, capturing all stdout+stderr output.
+    /// Uses a dedicated session identifier to avoid interfering with terminal sessions.
+    func runAsync(command: String, timeout: TimeInterval = 30) async -> (output: String, exitCode: Int32) {
+        await withCheckedContinuation { continuation in
+            var outputData = Data()
+            let lock = NSLock()
+
+            // IMPORTANT: Executor._onStdout routes normal running-state output
+            // to requestInput (as a prompt string), NOT to receivedStdout.
+            // We must capture output from BOTH callbacks to get all command output.
+            let appendData: (Data) -> Void = { data in
+                lock.lock()
+                outputData.append(data)
+                lock.unlock()
+            }
+
+            let agentExecutor = Executor(
+                root: self.currentWorkingDirectory,
+                sessionIdentifier: "com.thebaselab.agent.cmd.\(UUID().uuidString)",
+                onStdout: appendData,
+                onStderr: appendData,
+                onRequestInput: { prompt in
+                    // Normal running output arrives here as a String
+                    if let data = prompt.data(using: .utf8) {
+                        lock.lock()
+                        outputData.append(data)
+                        lock.unlock()
+                    }
+                }
+            )
+
+            // Set up timeout
+            let timeoutWorkItem = DispatchWorkItem {
+                agentExecutor.kill()
+            }
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + timeout,
+                execute: timeoutWorkItem
+            )
+
+            agentExecutor.dispatch(command: command) { code in
+                timeoutWorkItem.cancel()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                continuation.resume(returning: (output, code))
+            }
+        }
+    }
+}
+
 extension Executor.State {
     var displayName: String {
         switch self {

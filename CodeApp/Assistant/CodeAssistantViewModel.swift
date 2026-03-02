@@ -154,6 +154,16 @@ final class CodeAssistantViewModel: ObservableObject {
 
     @Published var selectionContext: SelectionContext?
 
+    // MARK: - Agent Mode
+
+    @Published var isAgentMode: Bool {
+        didSet {
+            defaults.set(isAgentMode, forKey: Self.agentModeDefaultsKey)
+        }
+    }
+    @Published var agentSession: AgentSession?
+    @Published var currentToolActivities: [ToolActivity] = []
+
     var currentModel: String {
         modelOverrides[selectedProvider] ?? selectedProvider.defaultModel
     }
@@ -204,6 +214,8 @@ final class CodeAssistantViewModel: ObservableObject {
     }
 
     private let defaults: UserDefaults
+    weak var app: MainApp?
+
     private var modelOverrides: [CodeAssistantProvider: String] = [:]
     private var streamTask: Task<Void, Never>?
     private let systemPrompt =
@@ -309,8 +321,47 @@ final class CodeAssistantViewModel: ObservableObject {
         - When presenting non-edit code blocks, specify the correct language for syntax highlighting.
         """
 
+    private let agentSystemPrompt =
+        """
+        You are an expert coding agent embedded in Code App, an iOS/iPadOS code editor.
+        You have access to tools that let you read files, write files, search code, list directories, and run shell commands in the user's workspace.
+
+        ## Your Approach
+        1. ALWAYS start by understanding the user's request fully.
+        2. Use tools to explore the codebase before making changes — read relevant files first.
+        3. Make targeted, surgical edits using the apply_edit tool.
+        4. After making changes, verify them when possible (re-read the file, run a command).
+        5. If a task requires multiple steps, plan them out and execute sequentially.
+
+        ## Tool Usage Guidelines
+        - **read_file**: Read file contents. Path is relative to workspace root.
+        - **write_file**: Create new files or completely replace file contents. Use apply_edit for surgical edits.
+        - **apply_edit**: Apply a SEARCH/REPLACE edit. The search text must EXACTLY match existing content.
+        - **list_directory**: Explore project structure. Use '.' for workspace root.
+        - **search_files**: Find code patterns across the workspace using grep.
+        - **run_command**: Run shell commands (Python, Node, git, grep, etc.).
+
+        ## Code Edit Format (SEARCH/REPLACE)
+        When using apply_edit, the search text must be an EXACT match of existing file content including whitespace and indentation.
+        Include 2-5 lines of context before and after the actual change for precise anchoring.
+
+        ## Environment
+        - iOS runtimes: Python 3.9.2, Node.js 18.19.0, Clang 14.0.0 (C/C++), PHP 8.3.2, OpenJDK 8
+        - Shell commands run via ios_system (common Unix tools: grep, sed, awk, cat, ls, find, git, etc.)
+        - File paths are relative to the workspace root directory
+        - Cannot spawn background daemons or long-running servers
+
+        ## Important Rules
+        - Never modify files without reading them first.
+        - Keep explanations concise. Focus on actions and results.
+        - Preserve the original code style, indentation, and conventions.
+        - If you cannot complete a task, explain what you tried and why it failed.
+        - Report what files you changed and summarize the changes made.
+        """
+
     private static let providerDefaultsKey = "codeassistant.provider.active"
     private static let temperatureDefaultsKey = "codeassistant.temperature"
+    private static let agentModeDefaultsKey = "codeassistant.agentMode"
     private static func modelDefaultsKey(for provider: CodeAssistantProvider) -> String {
         "codeassistant.model.\(provider.rawValue)"
     }
@@ -337,6 +388,13 @@ final class CodeAssistantViewModel: ObservableObject {
 
         if defaults.object(forKey: Self.temperatureDefaultsKey) != nil {
             temperature = defaults.double(forKey: Self.temperatureDefaultsKey)
+        }
+
+        // Default to agent mode on
+        if defaults.object(forKey: Self.agentModeDefaultsKey) != nil {
+            isAgentMode = defaults.bool(forKey: Self.agentModeDefaultsKey)
+        } else {
+            isAgentMode = true
         }
 
         loadHistory()
@@ -412,6 +470,8 @@ final class CodeAssistantViewModel: ObservableObject {
     func stopStreaming() {
         streamTask?.cancel()
         streamTask = nil
+        agentSession?.cancel()
+        agentSession = nil
         isStreaming = false
         if let index = messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
             messages[index].isStreaming = false
@@ -454,6 +514,19 @@ final class CodeAssistantViewModel: ObservableObject {
 
         attachments.removeAll()
 
+        // Agent mode: use the agentic tool-calling loop
+        if isAgentMode {
+            sendAgentMessage(
+                userPayload: userPayload,
+                conversationContext: conversationContext,
+                placeholderID: placeholder.id,
+                provider: provider,
+                model: model
+            )
+            return
+        }
+
+        // Standard chat mode (no tools)
         streamTask = Task {
             do {
                 switch provider {
@@ -463,7 +536,7 @@ final class CodeAssistantViewModel: ObservableObject {
                         placeholderID: placeholder.id,
                         model: model)
                 case .anthropic:
-                    try await requestAnthropic(
+                    try await streamAnthropic(
                         history: conversationContext,
                         placeholderID: placeholder.id,
                         model: model)
@@ -479,6 +552,83 @@ final class CodeAssistantViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: - Agent Mode
+
+    private func sendAgentMessage(
+        userPayload: String,
+        conversationContext: [Message],
+        placeholderID: UUID,
+        provider: CodeAssistantProvider,
+        model: String
+    ) {
+        currentToolActivities.removeAll()
+
+        guard let app else {
+            handle(
+                error: CodeAssistantViewModel.AssistantError.upstreamError(
+                    "App reference not set. Cannot use agent mode."),
+                placeholderID: placeholderID
+            )
+            return
+        }
+
+        guard let workspaceURL = app.workSpaceStorage.currentDirectory._url else {
+            handle(
+                error: CodeAssistantViewModel.AssistantError.upstreamError(
+                    "No workspace directory open."),
+                placeholderID: placeholderID
+            )
+            return
+        }
+
+        let context = AgentContext(
+            workSpaceStorage: app.workSpaceStorage,
+            workspaceRoot: workspaceURL,
+            monacoInstance: app.monacoInstance,
+            activeFileURL: app.activeTextEditor?.url,
+            workspaceIndexer: app.workspaceIndexer
+        )
+
+        let session = AgentSession(
+            provider: provider,
+            model: model,
+            temperature: temperature,
+            systemPrompt: agentSystemPrompt,
+            context: context
+        )
+
+        session.onTextDelta = { [weak self] delta in
+            guard let self,
+                let idx = self.messages.firstIndex(where: { $0.id == placeholderID })
+            else { return }
+            self.messages[idx].body += delta
+        }
+
+        session.onToolActivityUpdate = { [weak self] activity in
+            guard let self else { return }
+            if let idx = self.currentToolActivities.firstIndex(where: { $0.id == activity.id }) {
+                self.currentToolActivities[idx] = activity
+            } else {
+                self.currentToolActivities.append(activity)
+            }
+        }
+
+        session.onComplete = { [weak self] in
+            self?.finalizeStream(for: placeholderID)
+            self?.agentSession = nil
+        }
+
+        session.onError = { [weak self] error in
+            self?.handle(error: error, placeholderID: placeholderID)
+            self?.agentSession = nil
+        }
+
+        // Pass prior conversation (excluding the placeholder) so the agent has context
+        let priorMessages = conversationContext.filter { $0.role != .system }
+        session.start(userMessage: userPayload, conversationHistory: priorMessages)
+        agentSession = session
     }
 
     private func handle(error: Error, placeholderID: UUID) {
@@ -566,7 +716,7 @@ final class CodeAssistantViewModel: ObservableObject {
         }
     }
 
-    private func requestAnthropic(
+    private func streamAnthropic(
         history: [Message],
         placeholderID: UUID,
         model: String
@@ -578,27 +728,25 @@ final class CodeAssistantViewModel: ObservableObject {
 
         let service = AIProxy.anthropicDirectService(unprotectedAPIKey: apiKey)
         let body = AnthropicMessageRequestBody(
-            maxTokens: 1024,
+            maxTokens: 8192,
             messages: anthropicMessages(from: history),
             model: model,
+            system: .text(systemPrompt),
             temperature: temperature
         )
 
-        do {
-            let response = try await service.messageRequest(body: body)
-            var aggregate = ""
-            for content in response.content {
-                if case let .text(text) = content {
-                    aggregate += text
+        let stream = try await service.streamingMessageRequest(
+            body: body, secondsToWait: 60
+        )
+        for try await event in stream {
+            if case .contentBlockDelta(let delta) = event,
+               case .textDelta(let textDelta) = delta.delta {
+                if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
+                    messages[index].body += textDelta.text
                 }
             }
-            if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
-                messages[index].body = aggregate
-            }
-            finalizeStream(for: placeholderID)
-        } catch {
-            throw error
         }
+        finalizeStream(for: placeholderID)
     }
 
     private func openAIMessages(from history: [Message]) -> [OpenAIChatCompletionRequestBody.Message] {
@@ -636,20 +784,17 @@ final class CodeAssistantViewModel: ObservableObject {
     }
 
     private func anthropicMessages(from history: [Message]) -> [AnthropicInputMessage] {
-        var payload = [
-            AnthropicInputMessage(content: [.text(systemPrompt)], role: .user)
-        ]
-        payload += history.compactMap { message in
+        // System prompt is passed via the `system:` parameter on the request body.
+        return history.compactMap { message in
             switch message.role {
             case .user:
-                return AnthropicInputMessage(content: [.text(message.payload)], role: .user)
+                return AnthropicInputMessage(content: .text(message.payload), role: .user)
             case .assistant:
-                return AnthropicInputMessage(content: [.text(message.payload)], role: .assistant)
+                return AnthropicInputMessage(content: .text(message.payload), role: .assistant)
             case .system:
                 return nil
             }
         }
-        return payload
     }
 
     private func buildPayload(for text: String, attachments: [Attachment]) -> String {

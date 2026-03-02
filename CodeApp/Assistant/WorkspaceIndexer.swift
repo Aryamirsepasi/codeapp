@@ -2,7 +2,7 @@
 //  WorkspaceIndexer.swift
 //  Code App
 //
-//  Created by Claude.
+//  Created by Arya Mirsepasi.
 //
 
 import AIProxy

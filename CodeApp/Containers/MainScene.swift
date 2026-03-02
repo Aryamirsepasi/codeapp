@@ -315,6 +315,8 @@ private struct MainView: View {
             }
 
             changeLogLastReadVersion = appVersion
+
+            assistantViewModel.app = App
         }
         .alert(
             alertManager.title, isPresented: $alertManager.isShowingAlert,

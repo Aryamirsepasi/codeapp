@@ -1,0 +1,722 @@
+//
+//  AgentSession.swift
+//  CodeApp
+//
+//  Drives the multi-turn agentic loop: sends messages with tools,
+//  processes tool calls, sends tool results back, and iterates until
+//  the model produces a final text response or budget is exhausted.
+//
+
+import AIProxy
+import Foundation
+
+// MARK: - Tool Activity (UI model)
+
+struct ToolActivity: Identifiable {
+    let id: UUID
+    let toolName: String
+    let summary: String
+    var status: Status
+    var resultPreview: String?
+    let startedAt: Date
+    var completedAt: Date?
+
+    enum Status {
+        case running
+        case completed
+        case failed
+    }
+
+    init(toolName: String, summary: String) {
+        self.id = UUID()
+        self.toolName = toolName
+        self.summary = summary
+        self.status = .running
+        self.startedAt = Date()
+    }
+
+    static func displayName(for toolName: String) -> String {
+        switch toolName {
+        case "read_file": return "Reading file"
+        case "write_file": return "Writing file"
+        case "apply_edit": return "Applying edit"
+        case "list_directory": return "Listing directory"
+        case "search_files": return "Searching files"
+        case "run_command": return "Running command"
+        default: return toolName
+        }
+    }
+}
+
+// MARK: - Internal Message Types
+
+enum AgentInternalMessage {
+    case system(String)
+    case user(String)
+    case assistantText(String)
+    case assistantToolCalls([AgentToolCall])
+    case toolResult(toolUseId: String, content: String, isError: Bool)
+}
+
+struct AgentToolCall {
+    let id: String
+    let name: String
+    let arguments: [String: Any]
+}
+
+// MARK: - Agent Session
+
+@MainActor
+final class AgentSession: ObservableObject {
+
+    enum SessionState {
+        case idle
+        case streaming
+        case executingTools
+        case completed
+        case failed(Error)
+        case cancelled
+    }
+
+    // MARK: Callbacks (set by ViewModel)
+
+    var onTextDelta: ((String) -> Void)?
+    var onToolActivityUpdate: ((ToolActivity) -> Void)?
+    var onComplete: (() -> Void)?
+    var onError: ((Error) -> Void)?
+
+    // MARK: Published state
+
+    @Published private(set) var state: SessionState = .idle
+    @Published private(set) var toolActivities: [ToolActivity] = []
+    @Published private(set) var iterationCount: Int = 0
+
+    // MARK: Configuration
+
+    private let provider: CodeAssistantProvider
+    private let model: String
+    private let temperature: Double
+    private let systemPrompt: String
+    private let toolRegistry: ToolRegistry
+    private let context: AgentContext
+    private let maxIterations: Int
+    private let maxTokenBudget: Int
+    private let maxToolResultChars: Int
+
+    // MARK: Internal state
+
+    private var internalMessages: [AgentInternalMessage] = []
+    private var estimatedTokensUsed: Int = 0
+    private var task: Task<Void, Never>?
+
+    // MARK: Init
+
+    init(
+        provider: CodeAssistantProvider,
+        model: String,
+        temperature: Double,
+        systemPrompt: String,
+        toolRegistry: ToolRegistry = .default,
+        context: AgentContext,
+        maxIterations: Int = 25,
+        maxTokenBudget: Int = 100_000,
+        maxToolResultChars: Int = 16_000
+    ) {
+        self.provider = provider
+        self.model = model
+        self.temperature = temperature
+        self.systemPrompt = systemPrompt
+        self.toolRegistry = toolRegistry
+        self.context = context
+        self.maxIterations = maxIterations
+        self.maxTokenBudget = maxTokenBudget
+        self.maxToolResultChars = maxToolResultChars
+    }
+
+    // MARK: - Public API
+
+    func start(
+        userMessage: String,
+        conversationHistory: [CodeAssistantViewModel.Message]
+    ) {
+        state = .streaming
+
+        internalMessages = [.system(systemPrompt)]
+
+        for msg in conversationHistory {
+            switch msg.role {
+            case .user:
+                internalMessages.append(.user(msg.payload))
+            case .assistant:
+                internalMessages.append(.assistantText(msg.payload))
+            case .system:
+                break
+            }
+        }
+
+        internalMessages.append(.user(userMessage))
+
+        task = Task { [weak self] in
+            guard let self else { return }
+
+            await self.injectRAGContext(for: userMessage)
+
+            do {
+                switch self.provider {
+                case .anthropic:
+                    try await self.runAnthropicLoop()
+                case .openAI:
+                    try await self.runOpenAILoop()
+                case .openRouter:
+                    try await self.runOpenRouterLoop()
+                }
+                self.state = .completed
+                self.onComplete?()
+            } catch {
+                if Task.isCancelled {
+                    self.state = .cancelled
+                } else {
+                    self.state = .failed(error)
+                    self.onError?(error)
+                }
+            }
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        state = .cancelled
+    }
+
+    // MARK: - Anthropic Loop
+    //
+    // Uses streaming with AnthropicToolCallAccumulator for tool-call iterations.
+    // Tool IDs are captured from contentBlockStart events.
+
+    private func runAnthropicLoop() async throws {
+        let apiKey = CodeAssistantSettings.apiKey(for: .anthropic)
+        guard !apiKey.isEmpty else {
+            throw CodeAssistantViewModel.AssistantError.missingAPIKey(provider: .anthropic)
+        }
+
+        let service = AIProxy.anthropicDirectService(unprotectedAPIKey: apiKey)
+        let tools = toolRegistry.anthropicToolDefinitions()
+
+        while iterationCount < maxIterations && !Task.isCancelled {
+            iterationCount += 1
+            state = .streaming
+
+            let messages = buildAnthropicMessages()
+            let body = AnthropicMessageRequestBody(
+                maxTokens: 8192,
+                messages: messages,
+                model: model,
+                system: .text(systemPrompt),
+                temperature: temperature,
+                tools: tools
+            )
+
+            let stream = try await service.streamingMessageRequest(
+                body: body, secondsToWait: 120
+            )
+
+            var textContent = ""
+            var toolCalls: [AgentToolCall] = []
+            var accumulator = AnthropicToolCallAccumulator()
+            var currentToolId: String?
+            var stopReason: AnthropicStopReason?
+
+            for try await event in stream {
+                guard !Task.isCancelled else { throw CancellationError() }
+
+                switch event {
+                case .contentBlockStart(let blockStart):
+                    if case .toolUseBlock(let toolUseBlock) = blockStart.contentBlock {
+                        currentToolId = toolUseBlock.id
+                    }
+                case .contentBlockDelta(let delta):
+                    if case .textDelta(let textDelta) = delta.delta {
+                        textContent += textDelta.text
+                        onTextDelta?(textDelta.text)
+                    }
+                case .messageDelta(let msgDelta):
+                    stopReason = msgDelta.delta.stopReason
+                default:
+                    break
+                }
+
+                if let (toolName, toolInput) = try accumulator.append(event) {
+                    let toolId = currentToolId ?? UUID().uuidString
+                    toolCalls.append(
+                        AgentToolCall(id: toolId, name: toolName, arguments: toolInput))
+                    currentToolId = nil
+                }
+            }
+
+            if stopReason == .toolUse && !toolCalls.isEmpty {
+                internalMessages.append(.assistantToolCalls(toolCalls))
+                if !textContent.isEmpty {
+                    internalMessages.append(.assistantText(textContent))
+                }
+
+                state = .executingTools
+                for toolCall in toolCalls {
+                    await executeToolCall(toolCall)
+                }
+
+                updateTokenEstimate()
+                if estimatedTokensUsed > maxTokenBudget {
+                    onTextDelta?("\n\n[Token budget exceeded — summarizing results]")
+                    break
+                }
+
+                continue
+            } else {
+                if !textContent.isEmpty {
+                    internalMessages.append(.assistantText(textContent))
+                }
+                break
+            }
+        }
+
+        if iterationCount >= maxIterations {
+            onTextDelta?("\n\n[Maximum iterations reached]")
+        }
+    }
+
+    // MARK: - OpenAI Loop
+
+    private func runOpenAILoop() async throws {
+        let apiKey = CodeAssistantSettings.apiKey(for: .openAI)
+        guard !apiKey.isEmpty else {
+            throw CodeAssistantViewModel.AssistantError.missingAPIKey(provider: .openAI)
+        }
+
+        let service = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
+        let tools = toolRegistry.openAIToolDefinitions()
+
+        while iterationCount < maxIterations && !Task.isCancelled {
+            iterationCount += 1
+            state = .streaming
+
+            let messages = buildOpenAIMessages()
+            let requestBody = OpenAIChatCompletionRequestBody(
+                model: model,
+                messages: messages,
+                temperature: temperature,
+                tools: tools
+            )
+
+            let stream = try await service.streamingChatCompletionRequest(
+                body: requestBody, secondsToWait: 120
+            )
+
+            var textContent = ""
+            var toolCallAccumulator: [Int: (id: String, name: String, arguments: String)] = [:]
+            var finishReason: String?
+
+            for try await chunk in stream {
+                guard !Task.isCancelled else { throw CancellationError() }
+
+                if let delta = chunk.choices.first?.delta {
+                    if let content = delta.content {
+                        textContent += content
+                        onTextDelta?(content)
+                    }
+
+                    if let calls = delta.toolCalls {
+                        for call in calls {
+                            guard let idx = call.index else { continue }
+                            if toolCallAccumulator[idx] == nil {
+                                toolCallAccumulator[idx] = (
+                                    id: call.id ?? UUID().uuidString,
+                                    name: call.function?.name ?? "",
+                                    arguments: ""
+                                )
+                            }
+                            if let args = call.function?.arguments {
+                                toolCallAccumulator[idx]?.arguments += args
+                            }
+                        }
+                    }
+                }
+                finishReason = chunk.choices.first?.finishReason ?? finishReason
+            }
+
+            if finishReason == "tool_calls" && !toolCallAccumulator.isEmpty {
+                let toolCalls = toolCallAccumulator.sorted(by: { $0.key < $1.key }).map { entry in
+                    let args = parseJSON(entry.value.arguments)
+                    return AgentToolCall(
+                        id: entry.value.id,
+                        name: entry.value.name,
+                        arguments: args
+                    )
+                }
+
+                internalMessages.append(.assistantToolCalls(toolCalls))
+                if !textContent.isEmpty {
+                    internalMessages.append(.assistantText(textContent))
+                }
+
+                state = .executingTools
+                for toolCall in toolCalls {
+                    await executeToolCall(toolCall)
+                }
+
+                updateTokenEstimate()
+                if estimatedTokensUsed > maxTokenBudget {
+                    onTextDelta?("\n\n[Token budget exceeded — summarizing results]")
+                    break
+                }
+
+                continue
+            } else {
+                if !textContent.isEmpty {
+                    internalMessages.append(.assistantText(textContent))
+                }
+                break
+            }
+        }
+    }
+
+    // MARK: - OpenRouter Loop
+
+    private func runOpenRouterLoop() async throws {
+        let apiKey = CodeAssistantSettings.apiKey(for: .openRouter)
+        guard !apiKey.isEmpty else {
+            throw CodeAssistantViewModel.AssistantError.missingAPIKey(provider: .openRouter)
+        }
+
+        let service = AIProxy.openRouterDirectService(unprotectedAPIKey: apiKey)
+        let tools = toolRegistry.openRouterToolDefinitions()
+
+        while iterationCount < maxIterations && !Task.isCancelled {
+            iterationCount += 1
+            state = .streaming
+
+            let messages = buildOpenRouterMessages()
+            let requestBody = OpenRouterChatCompletionRequestBody(
+                messages: messages,
+                models: [model],
+                temperature: temperature,
+                tools: tools
+            )
+
+            let stream = try await service.streamingChatCompletionRequest(body: requestBody)
+
+            var textContent = ""
+            var toolCallAccumulator: [Int: (id: String, name: String, arguments: String)] = [:]
+            var finishReason: String?
+
+            for try await chunk in stream {
+                guard !Task.isCancelled else { throw CancellationError() }
+
+                if let delta = chunk.choices.first?.delta {
+                    if let content = delta.content {
+                        textContent += content
+                        onTextDelta?(content)
+                    }
+
+                    if let calls = delta.toolCalls {
+                        for call in calls {
+                            guard let idx = call.index else { continue }
+                            if toolCallAccumulator[idx] == nil {
+                                toolCallAccumulator[idx] = (
+                                    id: UUID().uuidString,
+                                    name: call.function?.name ?? "",
+                                    arguments: ""
+                                )
+                            }
+                            if let args = call.function?.arguments {
+                                toolCallAccumulator[idx]?.arguments += args
+                            }
+                        }
+                    }
+                }
+                finishReason = chunk.choices.first?.finishReason ?? finishReason
+            }
+
+            if finishReason == "tool_calls" && !toolCallAccumulator.isEmpty {
+                let toolCalls = toolCallAccumulator.sorted(by: { $0.key < $1.key }).map { entry in
+                    let args = parseJSON(entry.value.arguments)
+                    return AgentToolCall(
+                        id: entry.value.id,
+                        name: entry.value.name,
+                        arguments: args
+                    )
+                }
+
+                internalMessages.append(.assistantToolCalls(toolCalls))
+                if !textContent.isEmpty {
+                    internalMessages.append(.assistantText(textContent))
+                }
+
+                state = .executingTools
+                for toolCall in toolCalls {
+                    await executeToolCall(toolCall)
+                }
+
+                updateTokenEstimate()
+                if estimatedTokensUsed > maxTokenBudget {
+                    onTextDelta?("\n\n[Token budget exceeded — summarizing results]")
+                    break
+                }
+
+                continue
+            } else {
+                if !textContent.isEmpty {
+                    internalMessages.append(.assistantText(textContent))
+                }
+                break
+            }
+        }
+
+        if iterationCount >= maxIterations {
+            onTextDelta?("\n\n[Maximum iterations reached]")
+        }
+    }
+
+    // MARK: - Tool Execution
+
+    private func executeToolCall(_ toolCall: AgentToolCall) async {
+        let summary = toolCallSummary(toolCall)
+        var activity = ToolActivity(toolName: toolCall.name, summary: summary)
+        toolActivities.append(activity)
+        onToolActivityUpdate?(activity)
+
+        let result = await toolRegistry.execute(
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+            context: context
+        )
+
+        var content = result.content
+        if content.count > maxToolResultChars {
+            content =
+                String(content.prefix(maxToolResultChars))
+                + "\n\n[Output truncated at \(maxToolResultChars) characters]"
+        }
+
+        if let idx = toolActivities.firstIndex(where: { $0.id == activity.id }) {
+            toolActivities[idx].status = result.isError ? .failed : .completed
+            toolActivities[idx].resultPreview = String(content.prefix(200))
+            toolActivities[idx].completedAt = Date()
+            activity = toolActivities[idx]
+        }
+        onToolActivityUpdate?(activity)
+
+        internalMessages.append(
+            .toolResult(toolUseId: toolCall.id, content: content, isError: result.isError))
+    }
+
+    private func toolCallSummary(_ toolCall: AgentToolCall) -> String {
+        let displayName = ToolActivity.displayName(for: toolCall.name)
+        if let path = toolCall.arguments["path"] as? String {
+            return "\(displayName): \(path)"
+        }
+        if let command = toolCall.arguments["command"] as? String {
+            let short =
+                command.count > 60 ? String(command.prefix(60)) + "..." : command
+            return "\(displayName): \(short)"
+        }
+        if let pattern = toolCall.arguments["pattern"] as? String {
+            return "\(displayName): \(pattern)"
+        }
+        return displayName
+    }
+
+    // MARK: - Message Building
+
+    private func buildAnthropicMessages() -> [AnthropicInputMessage] {
+        // System prompt is passed via the `system:` parameter on the request body
+        var result: [AnthropicInputMessage] = []
+
+        for msg in internalMessages {
+            switch msg {
+            case .system:
+                break
+            case .user(let text):
+                result.append(
+                    AnthropicInputMessage(content: .text(text), role: .user))
+            case .assistantText(let text):
+                result.append(
+                    AnthropicInputMessage(content: .text(text), role: .assistant))
+            case .assistantToolCalls(let calls):
+                let blocks: [AnthropicContentBlockParam] = calls.map { call in
+                    .toolUseBlock(AnthropicToolUseBlockParam(
+                        id: call.id,
+                        input: call.arguments.mapValues { AIProxyJSONValue.from($0) },
+                        name: call.name
+                    ))
+                }
+                result.append(
+                    AnthropicInputMessage(content: .blocks(blocks), role: .assistant))
+            case .toolResult(let toolUseId, let content, let isError):
+                result.append(
+                    AnthropicInputMessage(
+                        content: .blocks([
+                            .toolResultBlock(AnthropicToolResultBlockParam(
+                                toolUseId: toolUseId,
+                                content: .text(content),
+                                isError: isError
+                            ))
+                        ]),
+                        role: .user
+                    ))
+            }
+        }
+
+        return result
+    }
+
+    private func buildOpenAIMessages() -> [OpenAIChatCompletionRequestBody.Message] {
+        var result: [OpenAIChatCompletionRequestBody.Message] = []
+
+        for msg in internalMessages {
+            switch msg {
+            case .system(let text):
+                result.append(.system(content: .text(text)))
+            case .user(let text):
+                result.append(.user(content: .text(text)))
+            case .assistantText(let text):
+                result.append(.assistant(content: .text(text)))
+            case .assistantToolCalls(let calls):
+                let toolCalls = calls.map { call in
+                    OpenAIChatCompletionRequestBody.Message.ToolCall(
+                        id: call.id,
+                        function: .init(
+                            name: call.name,
+                            arguments: serializeJSON(call.arguments)
+                        )
+                    )
+                }
+                result.append(.assistant(toolCalls: toolCalls))
+            case .toolResult(let toolUseId, let content, _):
+                result.append(.tool(content: .text(content), toolCallID: toolUseId))
+            }
+        }
+
+        return result
+    }
+
+    private func buildOpenRouterMessages() -> [OpenRouterChatCompletionRequestBody.Message] {
+        var result: [OpenRouterChatCompletionRequestBody.Message] = []
+
+        for msg in internalMessages {
+            switch msg {
+            case .system(let text):
+                result.append(.system(content: .text(text)))
+            case .user(let text):
+                result.append(.user(content: .text(text)))
+            case .assistantText(let text):
+                result.append(.assistant(content: .text(text)))
+            case .assistantToolCalls(let calls):
+                // SDK lacks assistant(toolCalls:) — encode as text
+                let formatted = calls.map { call in
+                    let argsStr = serializeJSON(call.arguments)
+                    return "[tool_call] \(call.name): \(argsStr)"
+                }.joined(separator: "\n")
+                result.append(.assistant(content: .text(formatted)))
+            case .toolResult(let toolUseId, let content, let isError):
+                let prefix = isError ? "[error] " : ""
+                result.append(.user(content: .text(
+                    "\(prefix)[tool_result \(toolUseId)]\n\(content)"
+                )))
+            }
+        }
+
+        return result
+    }
+
+    // MARK: - RAG Context Injection
+
+    private func injectRAGContext(for query: String) async {
+        guard let indexer = context.workspaceIndexer,
+            indexer.lastIndexedDate != nil
+        else { return }
+
+        let ragContext = await indexer.getRelevantContext(for: query, maxChunks: 3)
+        guard !ragContext.isEmpty else { return }
+
+        let contextBlock = """
+            <workspace_context>
+            The following code snippets from the user's workspace may be relevant:
+
+            \(ragContext)
+            </workspace_context>
+            """
+
+        if internalMessages.count >= 2 {
+            internalMessages.insert(.system(contextBlock), at: 1)
+        }
+    }
+
+    // MARK: - Token Estimation
+
+    private func updateTokenEstimate() {
+        estimatedTokensUsed = 0
+        for msg in internalMessages {
+            switch msg {
+            case .system(let t): estimatedTokensUsed += t.count / 4
+            case .user(let t): estimatedTokensUsed += t.count / 4
+            case .assistantText(let t): estimatedTokensUsed += t.count / 4
+            case .assistantToolCalls(let calls):
+                for call in calls {
+                    estimatedTokensUsed += call.name.count / 4 + 50
+                }
+            case .toolResult(_, let content, _):
+                estimatedTokensUsed += content.count / 4
+            }
+        }
+    }
+
+    // MARK: - JSON Helpers
+
+    private func parseJSON(_ jsonString: String) -> [String: Any] {
+        guard let data = jsonString.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return [:]
+        }
+        return obj
+    }
+
+    private func serializeJSON(_ dict: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+            let str = String(data: data, encoding: .utf8)
+        else {
+            return "{}"
+        }
+        return str
+    }
+}
+
+// MARK: - AIProxyJSONValue Helpers
+
+extension AIProxyJSONValue {
+    /// Convert Any to AIProxyJSONValue for tool call input serialization.
+    static func from(_ value: Any) -> AIProxyJSONValue {
+        if let s = value as? String { return .string(s) }
+        if let i = value as? Int { return .int(i) }
+        if let d = value as? Double { return .double(d) }
+        if let b = value as? Bool { return .bool(b) }
+        if let arr = value as? [Any] { return .array(arr.map { AIProxyJSONValue.from($0) }) }
+        if let dict = value as? [String: Any] {
+            return .object(dict.mapValues { AIProxyJSONValue.from($0) })
+        }
+        return .string(String(describing: value))
+    }
+
+    /// Convert AIProxyJSONValue back to an untyped Any.
+    var untypedValue: Any {
+        switch self {
+        case .string(let s): return s
+        case .int(let i): return i
+        case .double(let d): return d
+        case .bool(let b): return b
+        case .null(_): return NSNull()
+        case .array(let arr): return arr.map { $0.untypedValue }
+        case .object(let dict): return dict.mapValues { $0.untypedValue }
+        }
+    }
+}

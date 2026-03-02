@@ -2,7 +2,7 @@
 //  QuickCommandOverlay.swift
 //  Code App
 //
-//  Created by Claude.
+//  Created by Arya Mirsepasi.
 //
 
 import AIProxy
@@ -250,7 +250,7 @@ struct QuickCommandOverlay: View {
                 maxTokens: 2048,
                 messages: [
                     AnthropicInputMessage(
-                        content: [.text("\(systemPrompt)\n\n\(prompt)")],
+                        content: .text("\(systemPrompt)\n\n\(prompt)"),
                         role: .user
                     )
                 ],
@@ -259,8 +259,8 @@ struct QuickCommandOverlay: View {
             )
             let response = try await service.messageRequest(body: body)
             for content in response.content {
-                if case let .text(text) = content {
-                    return text
+                if case let .textBlock(textBlock) = content {
+                    return textBlock.text
                 }
             }
             return ""

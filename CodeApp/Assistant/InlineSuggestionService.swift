@@ -2,7 +2,7 @@
 //  InlineSuggestionService.swift
 //  Code App
 //
-//  Created by Claude.
+//  Created by Arya Mirsepasi.
 //
 
 import AIProxy
@@ -133,7 +133,7 @@ final class InlineSuggestionService: ObservableObject {
                     temperature: 0.0  // Deterministic for consistent completions
                 )
 
-                let response = try await service.chatCompletionRequest(body: requestBody)
+                let response = try await service.chatCompletionRequest(body: requestBody, secondsToWait: 60)
 
                 guard !Task.isCancelled else { return }
 
@@ -172,7 +172,7 @@ final class InlineSuggestionService: ObservableObject {
                     maxTokens: 100,
                     messages: [
                         AnthropicInputMessage(
-                            content: [.text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).\n\n\(prompt)")],
+                            content: .text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).\n\n\(prompt)"),
                             role: .user
                         )
                     ],
@@ -180,13 +180,13 @@ final class InlineSuggestionService: ObservableObject {
                     temperature: 0.0
                 )
 
-                let response = try await service.messageRequest(body: body)
+                let response = try await service.messageRequest(body: body, secondsToWait: 60)
 
                 guard !Task.isCancelled else { return }
 
                 for content in response.content {
-                    if case let .text(text) = content {
-                        let cleaned = cleanCompletion(text)
+                    if case let .textBlock(textBlock) = content {
+                        let cleaned = cleanCompletion(textBlock.text)
                         if !cleaned.isEmpty {
                             currentSuggestion = cleaned
                         }
