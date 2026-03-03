@@ -105,11 +105,7 @@ final class InlineSuggestionService: ObservableObject {
         // Cancel previous request
         currentRequestTask?.cancel()
 
-        // Get API key - prefer OpenAI for gpt-4o-mini (fast and cheap)
-        let apiKey = CodeAssistantSettings.apiKey(for: .openAI)
-        guard !apiKey.isEmpty else {
-            // Fall back to Anthropic haiku
-            await requestCompletionAnthropic(prefix: prefix, suffix: suffix, languageId: languageId)
+        guard let route = resolveLightweightRoute() else {
             return
         }
 
@@ -119,29 +115,35 @@ final class InlineSuggestionService: ObservableObject {
             defer { isLoading = false }
 
             do {
-                let service = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
-
                 let prompt = buildFillInMiddlePrompt(prefix: prefix, suffix: suffix, languageId: languageId)
-
-                let requestBody = OpenAIChatCompletionRequestBody(
-                    model: "gpt-4o-mini",
-                    messages: [
-                        .system(content: .text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).")),
-                        .user(content: .text(prompt))
-                    ],
-                    maxTokens: 100,
-                    temperature: 0.0  // Deterministic for consistent completions
-                )
-
-                let response = try await service.chatCompletionRequest(body: requestBody, secondsToWait: 60)
-
                 guard !Task.isCancelled else { return }
 
-                if let completion = response.choices.first?.message.content {
-                    let cleaned = cleanCompletion(completion)
-                    if !cleaned.isEmpty {
-                        currentSuggestion = cleaned
-                    }
+                let completion: String?
+                switch route.provider {
+                case .openAI:
+                    completion = try await requestCompletionOpenAI(
+                        prompt: prompt,
+                        model: route.model,
+                        apiKey: route.apiKey
+                    )
+                case .anthropic:
+                    completion = try await requestCompletionAnthropic(
+                        prompt: prompt,
+                        model: route.model,
+                        apiKey: route.apiKey
+                    )
+                case .openRouter:
+                    completion = try await requestCompletionOpenRouter(
+                        prompt: prompt,
+                        model: route.model,
+                        apiKey: route.apiKey
+                    )
+                }
+
+                guard let completion else { return }
+                let cleaned = cleanCompletion(completion)
+                if !cleaned.isEmpty {
+                    currentSuggestion = cleaned
                 }
             } catch {
                 // Silent failure - don't interrupt user
@@ -150,53 +152,84 @@ final class InlineSuggestionService: ObservableObject {
         }
     }
 
-    private func requestCompletionAnthropic(
-        prefix: String,
-        suffix: String,
-        languageId: String
-    ) async {
-        let apiKey = CodeAssistantSettings.apiKey(for: .anthropic)
-        guard !apiKey.isEmpty else { return }
+    private func resolveLightweightRoute() -> (
+        provider: CodeAssistantProvider, model: String, apiKey: String
+    )? {
+        let settings = CodeAssistantSettings.lightweightModelSettings()
 
-        isLoading = true
+        let preferredProvider = settings.provider
+        let preferredKey = CodeAssistantSettings.apiKey(for: preferredProvider)
+        if !preferredKey.isEmpty {
+            return (preferredProvider, settings.model(for: preferredProvider), preferredKey)
+        }
 
-        currentRequestTask = Task {
-            defer { isLoading = false }
-
-            do {
-                let service = AIProxy.anthropicDirectService(unprotectedAPIKey: apiKey)
-
-                let prompt = buildFillInMiddlePrompt(prefix: prefix, suffix: suffix, languageId: languageId)
-
-                let body = AnthropicMessageRequestBody(
-                    maxTokens: 100,
-                    messages: [
-                        AnthropicInputMessage(
-                            content: .text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).\n\n\(prompt)"),
-                            role: .user
-                        )
-                    ],
-                    model: "claude-3-5-haiku-latest",
-                    temperature: 0.0
-                )
-
-                let response = try await service.messageRequest(body: body, secondsToWait: 60)
-
-                guard !Task.isCancelled else { return }
-
-                for content in response.content {
-                    if case let .textBlock(textBlock) = content {
-                        let cleaned = cleanCompletion(textBlock.text)
-                        if !cleaned.isEmpty {
-                            currentSuggestion = cleaned
-                        }
-                        break
-                    }
-                }
-            } catch {
-                print("[InlineSuggestion] Error: \(error.localizedDescription)")
+        for provider in CodeAssistantProvider.allCases {
+            let key = CodeAssistantSettings.apiKey(for: provider)
+            if !key.isEmpty {
+                return (provider, settings.model(for: provider), key)
             }
         }
+        return nil
+    }
+
+    private func requestCompletionOpenAI(prompt: String, model: String, apiKey: String) async throws -> String? {
+        let service = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
+        let requestBody = OpenAIChatCompletionRequestBody(
+            model: model,
+            messages: [
+                .system(content: .text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).")),
+                .user(content: .text(prompt)),
+            ],
+            maxTokens: 100,
+            temperature: 0.0
+        )
+        let response = try await service.chatCompletionRequest(body: requestBody, secondsToWait: 60)
+        return response.choices.first?.message.content
+    }
+
+    private func requestCompletionAnthropic(
+        prompt: String,
+        model: String,
+        apiKey: String
+    ) async throws -> String? {
+        let service = AIProxy.anthropicDirectService(unprotectedAPIKey: apiKey)
+        let body = AnthropicMessageRequestBody(
+            maxTokens: 100,
+            messages: [
+                AnthropicInputMessage(
+                    content: .text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).\n\n\(prompt)"),
+                    role: .user
+                )
+            ],
+            model: model,
+            temperature: 0.0
+        )
+        let response = try await service.messageRequest(body: body, secondsToWait: 60)
+        for content in response.content {
+            if case let .textBlock(textBlock) = content {
+                return textBlock.text
+            }
+        }
+        return nil
+    }
+
+    private func requestCompletionOpenRouter(
+        prompt: String,
+        model: String,
+        apiKey: String
+    ) async throws -> String? {
+        let service = AIProxy.openRouterDirectService(unprotectedAPIKey: apiKey)
+        let requestBody = OpenRouterChatCompletionRequestBody(
+            messages: [
+                .system(content: .text("You are a code completion assistant. Complete the code at the cursor position. Return ONLY the code to insert, no explanations or markdown. Keep completions short (1-3 lines max).")),
+                .user(content: .text(prompt)),
+            ],
+            maxTokens: 100,
+            models: [model],
+            temperature: 0.0
+        )
+        let response = try await service.chatCompletionRequest(body: requestBody)
+        return response.choices.first?.message.content
     }
 
     private func buildFillInMiddlePrompt(prefix: String, suffix: String, languageId: String) -> String {

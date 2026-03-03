@@ -9,7 +9,8 @@ import AIProxy
 import Foundation
 import SQLite3
 
-/// Service for indexing and searching code in the workspace using embeddings.
+/// Service for indexing and searching code in the workspace using embeddings
+/// when available, with lexical fallback for non-embedding providers.
 @MainActor
 final class WorkspaceIndexer: ObservableObject {
 
@@ -166,15 +167,13 @@ final class WorkspaceIndexer: ObservableObject {
             return
         }
 
-        // Get API key for embeddings
-        let apiKey = CodeAssistantSettings.apiKey(for: .openAI)
-        guard !apiKey.isEmpty else {
-            print("[WorkspaceIndexer] No OpenAI API key for embeddings")
-            isIndexing = false
-            return
+        let embeddingService: OpenAIService?
+        if let apiKey = embeddingAPIKey() {
+            embeddingService = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
+        } else {
+            embeddingService = nil
+            print("[WorkspaceIndexer] Embeddings unavailable for selected lightweight provider; indexing with lexical fallback")
         }
-
-        let service = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
 
         for (index, file) in files.enumerated() {
             guard !Task.isCancelled else { break }
@@ -186,9 +185,11 @@ final class WorkspaceIndexer: ObservableObject {
                 for chunk in chunks {
                     guard !Task.isCancelled else { break }
 
-                    // Generate embedding
-                    if let embedding = await generateEmbedding(for: chunk.content, service: service) {
+                    if let service = embeddingService {
+                        let embedding = await generateEmbedding(for: chunk.content, service: service)
                         saveChunk(chunk: chunk, embedding: embedding)
+                    } else {
+                        saveChunk(chunk: chunk, embedding: nil)
                     }
                 }
 
@@ -296,7 +297,7 @@ final class WorkspaceIndexer: ObservableObject {
         }
     }
 
-    private func saveChunk(chunk: (content: String, startLine: Int, filePath: String), embedding: [Float]) {
+    private func saveChunk(chunk: (content: String, startLine: Int, filePath: String), embedding: [Float]?) {
         let query = "INSERT INTO chunks (file_path, content, start_line, embedding) VALUES (?, ?, ?, ?)"
         var stmt: OpaquePointer?
 
@@ -306,12 +307,16 @@ final class WorkspaceIndexer: ObservableObject {
         sqlite3_bind_text(stmt, 2, (chunk.content as NSString).utf8String, -1, nil)
         sqlite3_bind_int(stmt, 3, Int32(chunk.startLine))
 
-        // Convert embedding to blob
-        _ = embedding.withUnsafeBytes { buffer in
-            let data = Data(buffer)
-            _ = data.withUnsafeBytes { dataBuffer in
-                sqlite3_bind_blob(stmt, 4, dataBuffer.baseAddress, Int32(data.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        if let embedding {
+            // Convert embedding to blob
+            _ = embedding.withUnsafeBytes { buffer in
+                let data = Data(buffer)
+                _ = data.withUnsafeBytes { dataBuffer in
+                    sqlite3_bind_blob(stmt, 4, dataBuffer.baseAddress, Int32(data.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+                }
             }
+        } else {
+            sqlite3_bind_null(stmt, 4)
         }
 
         sqlite3_step(stmt)
@@ -331,20 +336,27 @@ final class WorkspaceIndexer: ObservableObject {
             return
         }
 
-        let apiKey = CodeAssistantSettings.apiKey(for: .openAI)
-        guard !apiKey.isEmpty else {
-            print("[WorkspaceIndexer] No API key for search")
-            return
+        if let apiKey = embeddingAPIKey() {
+            let service = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
+            if let queryEmbedding = await generateEmbedding(for: query, service: service) {
+                await semanticSearch(queryEmbedding: queryEmbedding, limit: limit)
+                return
+            }
         }
 
-        let service = AIProxy.openAIDirectService(unprotectedAPIKey: apiKey)
+        await lexicalSearch(query: query, limit: limit)
+    }
 
-        // Generate embedding for query
-        guard let queryEmbedding = await generateEmbedding(for: query, service: service) else {
-            return
+    private func embeddingAPIKey() -> String? {
+        let lightweight = CodeAssistantSettings.lightweightModelSettings()
+        guard lightweight.provider == .openAI else {
+            return nil
         }
+        let key = CodeAssistantSettings.apiKey(for: .openAI)
+        return key.isEmpty ? nil : key
+    }
 
-        // Load all chunks and compute similarity
+    private func semanticSearch(queryEmbedding: [Float], limit: Int) async {
         var results: [SearchResult] = []
 
         let selectQuery = "SELECT file_path, content, start_line, embedding FROM chunks"
@@ -362,34 +374,104 @@ final class WorkspaceIndexer: ObservableObject {
             let content = String(cString: contentPtr)
             let startLine = Int(sqlite3_column_int(stmt, 2))
 
-            // Get embedding blob
-            if let blobPtr = sqlite3_column_blob(stmt, 3) {
-                let blobSize = sqlite3_column_bytes(stmt, 3)
-                let data = Data(bytes: blobPtr, count: Int(blobSize))
-                let chunkEmbedding = data.withUnsafeBytes {
-                    Array($0.bindMemory(to: Float.self))
-                }
-                _ = chunkEmbedding  // Explicitly use the result
-
-                let similarity = cosineSimilarity(queryEmbedding, chunkEmbedding)
-
-                results.append(SearchResult(
-                    filePath: filePath,
-                    fileName: URL(fileURLWithPath: filePath).lastPathComponent,
-                    content: String(content.prefix(500)),
-                    similarity: similarity,
-                    lineNumber: startLine
-                ))
+            guard let blobPtr = sqlite3_column_blob(stmt, 3) else { continue }
+            let blobSize = sqlite3_column_bytes(stmt, 3)
+            let data = Data(bytes: blobPtr, count: Int(blobSize))
+            let chunkEmbedding = data.withUnsafeBytes {
+                Array($0.bindMemory(to: Float.self))
             }
+
+            let similarity = cosineSimilarity(queryEmbedding, chunkEmbedding)
+
+            results.append(SearchResult(
+                filePath: filePath,
+                fileName: URL(fileURLWithPath: filePath).lastPathComponent,
+                content: String(content.prefix(500)),
+                similarity: similarity,
+                lineNumber: startLine
+            ))
         }
 
         sqlite3_finalize(stmt)
 
-        // Sort by similarity and take top results
         results.sort { $0.similarity > $1.similarity }
         await MainActor.run {
             searchResults = Array(results.prefix(limit))
         }
+    }
+
+    private func lexicalSearch(query: String, limit: Int) async {
+        let normalizedQuery = query.lowercased()
+        let terms = tokenize(query: query)
+        guard !terms.isEmpty else {
+            searchResults = []
+            return
+        }
+
+        var scored: [(result: SearchResult, score: Double)] = []
+
+        let selectQuery = "SELECT file_path, content, start_line FROM chunks"
+        var stmt: OpaquePointer?
+
+        guard sqlite3_prepare_v2(db, selectQuery, -1, &stmt, nil) == SQLITE_OK else { return }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let filePathPtr = sqlite3_column_text(stmt, 0),
+                  let contentPtr = sqlite3_column_text(stmt, 1) else {
+                continue
+            }
+
+            let filePath = String(cString: filePathPtr)
+            let content = String(cString: contentPtr)
+            let startLine = Int(sqlite3_column_int(stmt, 2))
+            let haystack = content.lowercased()
+
+            var score = 0.0
+            for term in terms {
+                let occurrences = haystack.components(separatedBy: term).count - 1
+                guard occurrences > 0 else { continue }
+                let weighted = Double(occurrences) * (term.count >= 4 ? 1.25 : 1.0)
+                score += weighted
+            }
+            if haystack.contains(normalizedQuery) {
+                score += 3.0
+            }
+            guard score > 0 else { continue }
+
+            let result = SearchResult(
+                filePath: filePath,
+                fileName: URL(fileURLWithPath: filePath).lastPathComponent,
+                content: String(content.prefix(500)),
+                similarity: score,
+                lineNumber: startLine
+            )
+            scored.append((result: result, score: score))
+        }
+
+        sqlite3_finalize(stmt)
+
+        scored.sort { $0.score > $1.score }
+        let maxScore = scored.first?.score ?? 1.0
+        let normalized = scored.prefix(limit).map { item in
+            SearchResult(
+                filePath: item.result.filePath,
+                fileName: item.result.fileName,
+                content: item.result.content,
+                similarity: min(1.0, item.score / maxScore),
+                lineNumber: item.result.lineNumber
+            )
+        }
+
+        await MainActor.run {
+            searchResults = normalized
+        }
+    }
+
+    private func tokenize(query: String) -> [String] {
+        query
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 }
     }
 
     private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Double {

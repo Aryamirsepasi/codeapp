@@ -35,6 +35,16 @@ protocol AgentTool {
     func execute(arguments: [String: Any], context: AgentContext) async -> ToolResult
 }
 
+private extension AgentContext {
+    func resolveToolPath(_ path: String) -> Result<URL, Error> {
+        do {
+            return .success(try resolveURL(for: path))
+        } catch {
+            return .failure(error)
+        }
+    }
+}
+
 // MARK: - Tool Registry
 
 final class ToolRegistry {
@@ -101,6 +111,7 @@ final class ToolRegistry {
         let r = ToolRegistry()
         r.register(ReadFileTool())
         r.register(WriteFileTool())
+        r.register(CreateFileTool())
         r.register(ApplyEditTool())
         r.register(ListDirectoryTool())
         r.register(SearchFilesTool())
@@ -132,7 +143,13 @@ struct ReadFileTool: AgentTool {
             return .error("Missing required parameter: path")
         }
 
-        let url = context.resolveURL(for: path)
+        let url: URL
+        switch context.resolveToolPath(path) {
+        case .success(let resolved):
+            url = resolved
+        case .failure(let error):
+            return .error(error.localizedDescription)
+        }
 
         do {
             let data = try await context.workSpaceStorage.contents(at: url)
@@ -188,39 +205,73 @@ struct WriteFileTool: AgentTool {
     ]
 
     func execute(arguments: [String: Any], context: AgentContext) async -> ToolResult {
-        guard let path = arguments["path"] as? String else {
-            return .error("Missing required parameter: path")
+        await executeWrite(arguments: arguments, context: context, toolLabel: Self.name)
+    }
+}
+
+// MARK: - create_file
+
+struct CreateFileTool: AgentTool {
+    static let name = "create_file"
+    static let toolDescription =
+        "Alias for write_file. Create a new file or completely replace file contents. Creates parent directories when needed."
+    static let inputSchema: [String: AIProxyJSONValue] = WriteFileTool.inputSchema
+
+    func execute(arguments: [String: Any], context: AgentContext) async -> ToolResult {
+        await executeWrite(arguments: arguments, context: context, toolLabel: Self.name)
+    }
+}
+
+@MainActor
+private func executeWrite(
+    arguments: [String: Any],
+    context: AgentContext,
+    toolLabel: String
+) async -> ToolResult {
+    guard let path = arguments["path"] as? String else {
+        return .error("Missing required parameter: path")
+    }
+    guard let content = arguments["content"] as? String else {
+        return .error("Missing required parameter: content")
+    }
+
+    let url: URL
+    switch context.resolveToolPath(path) {
+    case .success(let resolved):
+        url = resolved
+    case .failure(let error):
+        return .error(error.localizedDescription)
+    }
+    let resolvedPath = url.standardizedFileURL.path
+
+    // Enforce read-before-write for existing files
+    let fileExists = FileManager.default.fileExists(atPath: url.path)
+    if fileExists && !context.filesReadByAgent.contains(resolvedPath) {
+        return .error("You must read '\(path)' before overwriting it. Use read_file first.")
+    }
+
+    guard let data = content.data(using: .utf8) else {
+        return .error("Content cannot be encoded as UTF-8")
+    }
+
+    do {
+        let parentDir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+
+        try await context.workSpaceStorage.write(
+            at: url, content: data, atomically: true, overwrite: true)
+
+        // Sync Monaco if this is the active file
+        if context.isActiveFile(url), let monaco = context.monacoInstance {
+            await monaco.setValueForModel(url: url.absoluteString, value: content)
         }
-        guard let content = arguments["content"] as? String else {
-            return .error("Missing required parameter: content")
-        }
 
-        let url = context.resolveURL(for: path)
-        let resolvedPath = url.standardizedFileURL.path
-
-        // Enforce read-before-write for existing files
-        let fileExists = FileManager.default.fileExists(atPath: url.path)
-        if fileExists && !context.filesReadByAgent.contains(resolvedPath) {
-            return .error("You must read '\(path)' before overwriting it. Use read_file first.")
-        }
-
-        guard let data = content.data(using: .utf8) else {
-            return .error("Content cannot be encoded as UTF-8")
-        }
-
-        do {
-            try await context.workSpaceStorage.write(
-                at: url, content: data, atomically: true, overwrite: true)
-
-            // Sync Monaco if this is the active file
-            if context.isActiveFile(url), let monaco = context.monacoInstance {
-                await monaco.setValueForModel(url: url.absoluteString, value: content)
-            }
-
-            return ToolResult("Successfully wrote \(content.count) characters to \(path)")
-        } catch {
-            return .error("Failed to write file '\(path)': \(error.localizedDescription)")
-        }
+        let writtenPath = context.relativePath(for: url)
+        return ToolResult(
+            "Successfully \(fileExists ? "updated" : "created") \(writtenPath) (\(content.count) chars) via \(toolLabel)"
+        )
+    } catch {
+        return .error("Failed to write file '\(path)': \(error.localizedDescription)")
     }
 }
 
@@ -260,7 +311,13 @@ struct ApplyEditTool: AgentTool {
             return .error("Missing required parameter: replace")
         }
 
-        let url = context.resolveURL(for: path)
+        let url: URL
+        switch context.resolveToolPath(path) {
+        case .success(let resolved):
+            url = resolved
+        case .failure(let error):
+            return .error(error.localizedDescription)
+        }
         let resolvedPath = url.standardizedFileURL.path
 
         // Enforce read-before-write
@@ -332,7 +389,17 @@ struct ListDirectoryTool: AgentTool {
     func execute(arguments: [String: Any], context: AgentContext) async -> ToolResult {
         let path = (arguments["path"] as? String) ?? "."
         let cleanPath = (path == "." || path.isEmpty) ? "" : path
-        let url = cleanPath.isEmpty ? context.workspaceRoot : context.resolveURL(for: cleanPath)
+        let url: URL
+        if cleanPath.isEmpty {
+            url = context.workspaceRoot
+        } else {
+            switch context.resolveToolPath(cleanPath) {
+            case .success(let resolved):
+                url = resolved
+            case .failure(let error):
+                return .error(error.localizedDescription)
+            }
+        }
 
         do {
             let urls = try await context.workSpaceStorage.contentsOfDirectory(at: url)
@@ -388,7 +455,12 @@ struct SearchFilesTool: AgentTool {
 
         let searchPath: String
         if let path = arguments["path"] as? String, !path.isEmpty {
-            searchPath = context.resolveURL(for: path).path
+            switch context.resolveToolPath(path) {
+            case .success(let resolved):
+                searchPath = resolved.path
+            case .failure(let error):
+                return .error(error.localizedDescription)
+            }
         } else {
             searchPath = context.workspaceRoot.path
         }
@@ -417,13 +489,30 @@ struct SearchFilesTool: AgentTool {
             return ToolResult("No matches found for pattern: \(pattern)")
         }
 
-        let lines = output.components(separatedBy: "\n")
+        let lines = rewriteSearchPathsToRelative(output: output, context: context)
+            .components(separatedBy: "\n")
         if lines.count > Self.maxResults {
             let truncated = lines.prefix(Self.maxResults).joined(separator: "\n")
             return ToolResult(
                 truncated + "\n\n[\(lines.count - Self.maxResults) more results truncated]")
         }
-        return ToolResult(output)
+        return ToolResult(lines.joined(separator: "\n"))
+    }
+
+    private func rewriteSearchPathsToRelative(output: String, context: AgentContext) -> String {
+        output.components(separatedBy: .newlines).map { line in
+            guard !line.isEmpty else { return line }
+
+            let segments = line.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+            guard segments.count >= 3 else { return line }
+
+            let pathSegment = String(segments[0])
+            guard pathSegment.hasPrefix("/") else { return line }
+
+            let fileURL = URL(fileURLWithPath: pathSegment)
+            let relativePath = context.relativePath(for: fileURL)
+            return "\(relativePath):\(segments[1]):\(segments[2])"
+        }.joined(separator: "\n")
     }
 }
 

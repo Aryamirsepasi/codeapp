@@ -126,6 +126,11 @@ final class CodeAssistantViewModel: ObservableObject {
             defaults.set(selectedProvider.rawValue, forKey: Self.providerDefaultsKey)
         }
     }
+    @Published var lightweightProvider: CodeAssistantProvider {
+        didSet {
+            CodeAssistantSettings.persistLightweightProvider(lightweightProvider, defaults: defaults)
+        }
+    }
     @Published var isStreaming: Bool = false
     @Published var errorMessage: String?
     @Published var history: [Conversation] = [] {
@@ -174,6 +179,10 @@ final class CodeAssistantViewModel: ObservableObject {
 
     var currentModel: String {
         modelOverrides[selectedProvider] ?? selectedProvider.defaultModel
+    }
+
+    var currentLightweightModel: String {
+        lightweightModelOverrides[lightweightProvider] ?? lightweightProvider.defaultLightweightModel
     }
 
     var canSend: Bool {
@@ -225,6 +234,7 @@ final class CodeAssistantViewModel: ObservableObject {
     weak var app: MainApp?
 
     private var modelOverrides: [CodeAssistantProvider: String] = [:]
+    private var lightweightModelOverrides: [CodeAssistantProvider: String] = [:]
     private var streamTask: Task<Void, Never>?
     private let systemPrompt =
         """
@@ -387,6 +397,8 @@ final class CodeAssistantViewModel: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        CodeAssistantSettings.migrateOpenRouterDefaultIfNeeded(defaults: defaults)
+
         if
             let storedProvider = defaults.string(forKey: Self.providerDefaultsKey),
             let provider = CodeAssistantProvider(rawValue: storedProvider)
@@ -399,6 +411,13 @@ final class CodeAssistantViewModel: ObservableObject {
         for provider in CodeAssistantProvider.allCases {
             let storedModel = defaults.string(forKey: Self.modelDefaultsKey(for: provider))
             modelOverrides[provider] = storedModel ?? provider.defaultModel
+        }
+
+        let lightweightSettings = CodeAssistantSettings.lightweightModelSettings(defaults: defaults)
+        lightweightProvider = lightweightSettings.provider
+        for provider in CodeAssistantProvider.allCases {
+            lightweightModelOverrides[provider] =
+                lightweightSettings.modelOverrides[provider] ?? provider.defaultLightweightModel
         }
 
         if defaults.object(forKey: Self.temperatureDefaultsKey) != nil {
@@ -420,6 +439,30 @@ final class CodeAssistantViewModel: ObservableObject {
         let finalValue = normalized.isEmpty ? selectedProvider.defaultModel : normalized
         modelOverrides[selectedProvider] = finalValue
         defaults.set(finalValue, forKey: Self.modelDefaultsKey(for: selectedProvider))
+    }
+
+    func updateLightweightProvider(_ provider: CodeAssistantProvider) {
+        lightweightProvider = provider
+    }
+
+    func updateLightweightModel(
+        _ value: String,
+        for provider: CodeAssistantProvider? = nil
+    ) {
+        let targetProvider = provider ?? lightweightProvider
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalValue = normalized.isEmpty ? targetProvider.defaultLightweightModel : normalized
+        lightweightModelOverrides[targetProvider] = finalValue
+        CodeAssistantSettings.persistLightweightModel(
+            finalValue,
+            for: targetProvider,
+            defaults: defaults
+        )
+    }
+
+    func lightweightModel(for provider: CodeAssistantProvider? = nil) -> String {
+        let targetProvider = provider ?? lightweightProvider
+        return lightweightModelOverrides[targetProvider] ?? targetProvider.defaultLightweightModel
     }
 
     func attach(item: WorkSpaceStorage.FileItemRepresentable) {
@@ -842,13 +885,15 @@ final class CodeAssistantViewModel: ObservableObject {
             .system(content: .text(effectiveSystemPrompt))
         ]
         payload += history.compactMap { message in
+            let sourceText = message.payload.isEmpty ? message.body : message.payload
+            let normalizedText = OpenRouterReplayEnvelope.normalizeHistoryContent(sourceText)
             switch message.role {
             case .user:
-                return .user(content: .text(message.payload))
+                return .user(content: .text(normalizedText))
             case .assistant:
-                return .assistant(content: .text(message.payload))
+                return .assistant(content: .text(normalizedText))
             case .system:
-                return .system(content: .text(message.payload))
+                return .system(content: .text(normalizedText))
             }
         }
         return payload
@@ -1045,8 +1090,9 @@ final class CodeAssistantViewModel: ObservableObject {
         }
 
         let messagesToCompact = messages
-        let provider = selectedProvider
-        let model = currentModel
+        let route = currentLightweightRoute()
+        let provider = route.provider
+        let model = route.model
 
         messages.append(Message(
             role: .system,
@@ -1128,10 +1174,11 @@ final class CodeAssistantViewModel: ObservableObject {
                 \(configs)
                 """
 
+                let route = currentLightweightRoute()
                 let summary = try await compactionService.compact(
                     messages: [Message(role: .user, body: prompt, payload: prompt)],
-                    provider: selectedProvider,
-                    model: currentModel,
+                    provider: route.provider,
+                    model: route.model,
                     instructions: "Generate a rules file, not a summary."
                 )
 
@@ -1238,8 +1285,9 @@ final class CodeAssistantViewModel: ObservableObject {
         else { return }
 
         let turn = lastAssistant.body
-        let provider = selectedProvider
-        let model = currentModel
+        let route = currentLightweightRoute()
+        let provider = route.provider
+        let model = route.model
 
         Task {
             let (persist, fact, topic) = await memoryManager.evaluateForPersistence(
@@ -1264,5 +1312,15 @@ final class CodeAssistantViewModel: ObservableObject {
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         return "Chat \(formatter.string(from: Date()))"
+    }
+
+    private func currentLightweightRoute() -> (provider: CodeAssistantProvider, model: String) {
+        let settings = CodeAssistantSettings.lightweightModelSettings(defaults: defaults)
+        let provider = settings.provider
+        if lightweightProvider != provider {
+            lightweightProvider = provider
+        }
+        lightweightModelOverrides[provider] = settings.model(for: provider)
+        return (provider, settings.model(for: provider))
     }
 }

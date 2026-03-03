@@ -70,7 +70,7 @@ final class PermissionManager: ObservableObject {
 
     // Tools classified by their side-effect level
     private static let readTools: Set<String> = ["read_file", "list_directory", "search_files"]
-    private static let writeTools: Set<String> = ["write_file", "apply_edit"]
+    private static let writeTools: Set<String> = ["write_file", "create_file", "apply_edit"]
     private static let commandTools: Set<String> = ["run_command"]
 
     init() {

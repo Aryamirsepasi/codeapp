@@ -395,6 +395,13 @@ private struct AIAssistantSettingsSection: View {
                         .fontWeight(.medium)
                 }
 
+                NavigationLink {
+                    AILightweightModelConfigurationView()
+                } label: {
+                    Label("Lightweight AI Model", systemImage: "bolt.circle")
+                        .fontWeight(.medium)
+                }
+
                 Toggle(isOn: Binding(
                     get: { App.inlineSuggestionService.isEnabled },
                     set: { App.inlineSuggestionService.isEnabled = $0 }
@@ -488,6 +495,95 @@ private struct AIAssistantKeyManagementView: View {
             withAnimation {
                 showSavedIndicator = false
             }
+        }
+    }
+}
+
+private struct AILightweightModelConfigurationView: View {
+
+    @State private var selectedProvider: CodeAssistantProvider = .openAI
+    @State private var modelDraft: String = ""
+    @State private var showCustomModelInput = false
+
+    private var selectedModel: String {
+        let trimmed = modelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? selectedProvider.defaultLightweightModel : trimmed
+    }
+
+    var body: some View {
+        Form {
+            Section(header: Text("Provider")) {
+                Picker("Provider", selection: $selectedProvider) {
+                    ForEach(CodeAssistantProvider.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Section(
+                header: Text("Model"),
+                footer: Text(
+                    "Used for inline suggestions, memory evaluation, compaction, and workspace search/indexing."
+                )
+            ) {
+                ForEach(selectedProvider.suggestedModels, id: \.self) { model in
+                    Button {
+                        showCustomModelInput = false
+                        modelDraft = model
+                        CodeAssistantSettings.persistLightweightModel(model, for: selectedProvider)
+                    } label: {
+                        HStack {
+                            Text(model)
+                            Spacer()
+                            if selectedModel == model {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    showCustomModelInput = true
+                } label: {
+                    HStack {
+                        Text("Custom Model")
+                        Spacer()
+                        if showCustomModelInput && !selectedProvider.suggestedModels.contains(selectedModel) {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if showCustomModelInput {
+                    TextField("Model Name", text: $modelDraft)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .font(.system(.body, design: .monospaced))
+
+                    Button("Save Custom Model") {
+                        CodeAssistantSettings.persistLightweightModel(modelDraft, for: selectedProvider)
+                    }
+                    .disabled(modelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .navigationTitle("Lightweight Model")
+        .onAppear {
+            let settings = CodeAssistantSettings.lightweightModelSettings()
+            selectedProvider = settings.provider
+            modelDraft = settings.model(for: selectedProvider)
+            showCustomModelInput = !selectedProvider.suggestedModels.contains(selectedModel)
+        }
+        .onChange(of: selectedProvider) { provider in
+            CodeAssistantSettings.persistLightweightProvider(provider)
+            let settings = CodeAssistantSettings.lightweightModelSettings()
+            modelDraft = settings.model(for: provider)
+            showCustomModelInput = !provider.suggestedModels.contains(selectedModel)
         }
     }
 }

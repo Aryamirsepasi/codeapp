@@ -39,6 +39,7 @@ struct ToolActivity: Identifiable {
         switch toolName {
         case "read_file": return "Reading file"
         case "write_file": return "Writing file"
+        case "create_file": return "Creating file"
         case "apply_edit": return "Applying edit"
         case "list_directory": return "Listing directory"
         case "search_files": return "Searching files"
@@ -62,6 +63,129 @@ struct AgentToolCall {
     let id: String
     let name: String
     let arguments: [String: Any]
+}
+
+enum OpenRouterReplayEnvelope {
+    private static let marker = "codeapp_tool"
+
+    static func toolCall(id: String, name: String, arguments: [String: Any]) -> String {
+        let payload: [String: Any] = [
+            "type": "tool_call",
+            "id": id,
+            "name": name,
+            "arguments": arguments,
+        ]
+        return wrap(payload)
+    }
+
+    static func toolResult(toolCallID: String, content: String, isError: Bool) -> String {
+        let payload: [String: Any] = [
+            "type": "tool_result",
+            "tool_call_id": toolCallID,
+            "is_error": isError,
+            "content": content,
+        ]
+        return wrap(payload)
+    }
+
+    static func normalizeHistoryContent(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return text }
+        return trimmed.replacingOccurrences(of: "\r\n", with: "\n")
+    }
+
+    private static func wrap(_ payload: [String: Any]) -> String {
+        let json = serializeJSON(payload)
+        return "<\(marker)>\(json)</\(marker)>"
+    }
+
+    private static func serializeJSON(_ dict: [String: Any]) -> String {
+        guard
+            JSONSerialization.isValidJSONObject(dict),
+            let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+            let str = String(data: data, encoding: .utf8)
+        else {
+            return "{}"
+        }
+        return str
+    }
+}
+
+struct StreamedToolCallAccumulator {
+    private struct Entry {
+        let order: Int
+        var id: String
+        var name: String
+        var arguments: String
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var nextOrder = 0
+    private var nextGeneratedID = 0
+    private var nextFallbackKey = 0
+    private var activeUnindexedKey: String?
+
+    mutating func append(index: Int?, id: String?, name: String?, arguments: String?) {
+        let key = resolveKey(index: index, id: id, name: name)
+        var entry = entries[key] ?? Entry(
+            order: nextOrder,
+            id: (id?.isEmpty == false ? id : nil) ?? makeGeneratedID(),
+            name: "",
+            arguments: ""
+        )
+        if entries[key] == nil {
+            nextOrder += 1
+        }
+
+        if let id, !id.isEmpty {
+            entry.id = id
+        }
+        if let name, !name.isEmpty {
+            entry.name = name
+        }
+        if let arguments, !arguments.isEmpty {
+            entry.arguments += arguments
+        }
+
+        entries[key] = entry
+        activeUnindexedKey = (index == nil) ? key : nil
+    }
+
+    func makeToolCalls(parseJSON: (String) -> [String: Any]) -> [AgentToolCall] {
+        entries.values
+            .sorted { $0.order < $1.order }
+            .map { entry in
+                let normalizedName = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return AgentToolCall(
+                    id: entry.id,
+                    name: normalizedName.isEmpty ? "__missing_tool_name__" : normalizedName,
+                    arguments: parseJSON(entry.arguments)
+                )
+            }
+    }
+
+    private mutating func resolveKey(index: Int?, id: String?, name: String?) -> String {
+        if let index {
+            return "index:\(index)"
+        }
+        if let id, !id.isEmpty {
+            return "id:\(id)"
+        }
+        if let activeUnindexedKey,
+           let entry = entries[activeUnindexedKey],
+           entry.name.isEmpty || (name?.isEmpty ?? true) {
+            return activeUnindexedKey
+        }
+
+        let key = "fallback:\(nextFallbackKey)"
+        nextFallbackKey += 1
+        return key
+    }
+
+    private mutating func makeGeneratedID() -> String {
+        defer { nextGeneratedID += 1 }
+        return "toolcall-\(nextGeneratedID)"
+    }
 }
 
 // MARK: - Agent Session
@@ -336,9 +460,7 @@ final class AgentSession: ObservableObject {
             )
 
             var textContent = ""
-            var toolCallAccumulator: [Int: (id: String, name: String, arguments: String)] = [:]
-            var finishReason: String?
-
+            var toolCallAccumulator = StreamedToolCallAccumulator()
             for try await chunk in stream {
                 guard !Task.isCancelled else { throw CancellationError() }
 
@@ -350,32 +472,19 @@ final class AgentSession: ObservableObject {
 
                     if let calls = delta.toolCalls {
                         for call in calls {
-                            guard let idx = call.index else { continue }
-                            if toolCallAccumulator[idx] == nil {
-                                toolCallAccumulator[idx] = (
-                                    id: call.id ?? UUID().uuidString,
-                                    name: call.function?.name ?? "",
-                                    arguments: ""
-                                )
-                            }
-                            if let args = call.function?.arguments {
-                                toolCallAccumulator[idx]?.arguments += args
-                            }
+                            toolCallAccumulator.append(
+                                index: call.index,
+                                id: nil,
+                                name: call.function?.name,
+                                arguments: call.function?.arguments
+                            )
                         }
                     }
                 }
-                finishReason = chunk.choices.first?.finishReason ?? finishReason
             }
 
-            if finishReason == "tool_calls" && !toolCallAccumulator.isEmpty {
-                let toolCalls = toolCallAccumulator.sorted(by: { $0.key < $1.key }).map { entry in
-                    let args = parseJSON(entry.value.arguments)
-                    return AgentToolCall(
-                        id: entry.value.id,
-                        name: entry.value.name,
-                        arguments: args
-                    )
-                }
+            let toolCalls = toolCallAccumulator.makeToolCalls(parseJSON: parseJSON)
+            if !toolCalls.isEmpty {
 
                 internalMessages.append(.assistantToolCalls(toolCalls))
                 if !textContent.isEmpty {
@@ -430,9 +539,7 @@ final class AgentSession: ObservableObject {
             let stream = try await service.streamingChatCompletionRequest(body: requestBody)
 
             var textContent = ""
-            var toolCallAccumulator: [Int: (id: String, name: String, arguments: String)] = [:]
-            var finishReason: String?
-
+            var toolCallAccumulator = StreamedToolCallAccumulator()
             for try await chunk in stream {
                 guard !Task.isCancelled else { throw CancellationError() }
 
@@ -444,32 +551,19 @@ final class AgentSession: ObservableObject {
 
                     if let calls = delta.toolCalls {
                         for call in calls {
-                            guard let idx = call.index else { continue }
-                            if toolCallAccumulator[idx] == nil {
-                                toolCallAccumulator[idx] = (
-                                    id: UUID().uuidString,
-                                    name: call.function?.name ?? "",
-                                    arguments: ""
-                                )
-                            }
-                            if let args = call.function?.arguments {
-                                toolCallAccumulator[idx]?.arguments += args
-                            }
+                            toolCallAccumulator.append(
+                                index: call.index,
+                                id: nil,
+                                name: call.function?.name,
+                                arguments: call.function?.arguments
+                            )
                         }
                     }
                 }
-                finishReason = chunk.choices.first?.finishReason ?? finishReason
             }
 
-            if finishReason == "tool_calls" && !toolCallAccumulator.isEmpty {
-                let toolCalls = toolCallAccumulator.sorted(by: { $0.key < $1.key }).map { entry in
-                    let args = parseJSON(entry.value.arguments)
-                    return AgentToolCall(
-                        id: entry.value.id,
-                        name: entry.value.name,
-                        arguments: args
-                    )
-                }
+            let toolCalls = toolCallAccumulator.makeToolCalls(parseJSON: parseJSON)
+            if !toolCalls.isEmpty {
 
                 internalMessages.append(.assistantToolCalls(toolCalls))
                 if !textContent.isEmpty {
@@ -694,16 +788,22 @@ final class AgentSession: ObservableObject {
             case .assistantText(let text):
                 result.append(.assistant(content: .text(text)))
             case .assistantToolCalls(let calls):
-                // SDK lacks assistant(toolCalls:) — encode as text
+                // SDK lacks assistant(toolCalls:) — encode deterministic text envelopes
                 let formatted = calls.map { call in
-                    let argsStr = serializeJSON(call.arguments)
-                    return "[tool_call] \(call.name): \(argsStr)"
+                    OpenRouterReplayEnvelope.toolCall(
+                        id: call.id,
+                        name: call.name,
+                        arguments: call.arguments
+                    )
                 }.joined(separator: "\n")
                 result.append(.assistant(content: .text(formatted)))
             case .toolResult(let toolUseId, let content, let isError):
-                let prefix = isError ? "[error] " : ""
                 result.append(.user(content: .text(
-                    "\(prefix)[tool_result \(toolUseId)]\n\(content)"
+                    OpenRouterReplayEnvelope.toolResult(
+                        toolCallID: toolUseId,
+                        content: content,
+                        isError: isError
+                    )
                 )))
             }
         }
@@ -764,10 +864,14 @@ final class AgentSession: ObservableObject {
     // MARK: - JSON Helpers
 
     private func parseJSON(_ jsonString: String) -> [String: Any] {
-        guard let data = jsonString.data(using: .utf8),
+        let trimmed = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return [:]
+        }
+        guard let data = trimmed.data(using: .utf8),
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return [:]
+            return ["_raw_arguments": trimmed]
         }
         return obj
     }
