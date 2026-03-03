@@ -24,8 +24,14 @@ struct CodeAssistantPanel: View {
     @State private var showsHistorySheet = false
     @State private var showsModelPicker = false
     @State private var showsCodebaseSearch = false
+    @State private var showsSlashAutocomplete = false
 
     private let scrollViewID = "code-assistant-scroll"
+
+    /// Matching slash commands for autocomplete.
+    private var matchingSlashCommands: [SlashCommand] {
+        viewModel.slashCommandEngine.matchingCommands(prefix: viewModel.currentInput)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,6 +54,9 @@ struct CodeAssistantPanel: View {
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .shadow(color: Color.black.opacity(0.15), radius: 24, x: 0, y: 16)
+        .onAppear {
+            viewModel.configureForWorkspace()
+        }
         .sheet(isPresented: $showsAttachmentPicker) {
             AttachmentPickerView(root: app.workSpaceStorage.currentDirectory) { item in
                 viewModel.attach(item: item)
@@ -113,6 +122,26 @@ struct CodeAssistantPanel: View {
                         viewModel.isAgentMode ? "Agent Mode" : "Chat Mode",
                         systemImage: viewModel.isAgentMode ? "cpu" : "bubble.left.and.bubble.right"
                     )
+                }
+
+                Divider()
+
+                // Permission mode picker (Phase 3)
+                Menu {
+                    ForEach(PermissionMode.allCases) { mode in
+                        Button {
+                            viewModel.permissionManager.mode = mode
+                        } label: {
+                            HStack {
+                                Text(mode.displayName)
+                                if viewModel.permissionManager.mode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Permissions: \(viewModel.permissionManager.mode.displayName)", systemImage: "lock.shield")
                 }
 
                 Divider()
@@ -248,6 +277,11 @@ struct CodeAssistantPanel: View {
 
     private var inputSection: some View {
         VStack(spacing: 8) {
+            // Slash command autocomplete (Phase 2)
+            if viewModel.currentInput.hasPrefix("/") && !matchingSlashCommands.isEmpty {
+                slashAutocompleteView
+            }
+
             // Error message (when present)
             if let error = viewModel.errorMessage {
                 HStack {
@@ -261,7 +295,7 @@ struct CodeAssistantPanel: View {
                 .padding(.horizontal)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
-            
+
             // Input controls
             HStack(spacing: 8) {
                 // Attachment button
@@ -344,6 +378,42 @@ struct CodeAssistantPanel: View {
             .padding(.horizontal)
             .padding(.vertical, 12)
         }
+    }
+
+    /// Slash command autocomplete dropdown.
+    private var slashAutocompleteView: some View {
+        VStack(spacing: 0) {
+            ForEach(matchingSlashCommands) { command in
+                Button {
+                    viewModel.currentInput = command.name + " "
+                } label: {
+                    HStack {
+                        Text(command.name)
+                            .font(.subheadline.monospaced())
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Text(command.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+
+                if command.id != matchingSlashCommands.last?.id {
+                    Divider()
+                }
+            }
+        }
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(.separator), lineWidth: 0.5)
+        )
+        .padding(.horizontal)
     }
 
     private var tokenCountColor: Color {

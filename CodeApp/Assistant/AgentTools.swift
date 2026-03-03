@@ -143,6 +143,23 @@ struct ReadFileTool: AgentTool {
                 content = String(content.prefix(Self.maxReadSize))
                     + "\n\n[Truncated at \(Self.maxReadSize) characters]"
             }
+
+            // Track that this file has been read (for read-before-write enforcement)
+            let resolvedPath = url.standardizedFileURL.path
+            context.filesReadByAgent.insert(resolvedPath)
+
+            // Trigger lazy subdirectory rule loading
+            let directory = url.deletingLastPathComponent()
+            let relativeDirPath = directory.path.replacingOccurrences(
+                of: context.workspaceRoot.path, with: ""
+            )
+            if !relativeDirPath.isEmpty {
+                await context.rulesEngine?.loadSubdirectoryRules(
+                    directoryPath: relativeDirPath,
+                    workspaceRoot: context.workspaceRoot
+                )
+            }
+
             return ToolResult(content)
         } catch {
             return .error("Failed to read file '\(path)': \(error.localizedDescription)")
@@ -154,7 +171,7 @@ struct ReadFileTool: AgentTool {
 
 struct WriteFileTool: AgentTool {
     static let name = "write_file"
-    static let toolDescription = "Create a new file or completely replace the contents of an existing file. Use apply_edit for surgical edits to existing files."
+    static let toolDescription = "Create a new file or completely replace the contents of an existing file. Use apply_edit for surgical edits to existing files. You must read existing files before overwriting them."
     static let inputSchema: [String: AIProxyJSONValue] = [
         "type": "object",
         "properties": [
@@ -179,6 +196,13 @@ struct WriteFileTool: AgentTool {
         }
 
         let url = context.resolveURL(for: path)
+        let resolvedPath = url.standardizedFileURL.path
+
+        // Enforce read-before-write for existing files
+        let fileExists = FileManager.default.fileExists(atPath: url.path)
+        if fileExists && !context.filesReadByAgent.contains(resolvedPath) {
+            return .error("You must read '\(path)' before overwriting it. Use read_file first.")
+        }
 
         guard let data = content.data(using: .utf8) else {
             return .error("Content cannot be encoded as UTF-8")
@@ -237,6 +261,12 @@ struct ApplyEditTool: AgentTool {
         }
 
         let url = context.resolveURL(for: path)
+        let resolvedPath = url.standardizedFileURL.path
+
+        // Enforce read-before-write
+        if !context.filesReadByAgent.contains(resolvedPath) {
+            return .error("You must read '\(path)' before editing it. Use read_file first.")
+        }
 
         // Read current content
         let original: String

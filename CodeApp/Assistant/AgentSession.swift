@@ -85,6 +85,9 @@ final class AgentSession: ObservableObject {
     var onComplete: (() -> Void)?
     var onError: ((Error) -> Void)?
 
+    /// Permission request callback. Parameters: tool name, description, completion (allow/deny).
+    var onPermissionRequest: ((String, String, @escaping (Bool) -> Void) -> Void)?
+
     // MARK: Published state
 
     @Published private(set) var state: SessionState = .idle
@@ -142,6 +145,26 @@ final class AgentSession: ObservableObject {
         state = .streaming
 
         internalMessages = [.system(systemPrompt)]
+
+        // Inject rules context (Phase 1)
+        if let rulesEngine = context.rulesEngine {
+            let rules = rulesEngine.rulesContent(forFilePath: nil, mode: "agent")
+            if !rules.isEmpty {
+                internalMessages.append(.user("<rules>\n\(rules)\n</rules>"))
+            }
+        }
+
+        // Inject memory context (Phase 5)
+        if let memoryManager = context.memoryManager, memoryManager.isLoaded {
+            Task {
+                let memory = await memoryManager.loadIndex()
+                if !memory.isEmpty {
+                    // Insert after rules but before conversation history
+                    let insertIdx = min(internalMessages.count, 2)
+                    internalMessages.insert(.user("<memory>\n\(memory)\n</memory>"), at: insertIdx)
+                }
+            }
+        }
 
         for msg in conversationHistory {
             switch msg.role {
@@ -265,6 +288,7 @@ final class AgentSession: ObservableObject {
                 }
 
                 updateTokenEstimate()
+                checkCompactionHint()
                 if estimatedTokensUsed > maxTokenBudget {
                     onTextDelta?("\n\n[Token budget exceeded — summarizing results]")
                     break
@@ -364,6 +388,7 @@ final class AgentSession: ObservableObject {
                 }
 
                 updateTokenEstimate()
+                checkCompactionHint()
                 if estimatedTokensUsed > maxTokenBudget {
                     onTextDelta?("\n\n[Token budget exceeded — summarizing results]")
                     break
@@ -457,6 +482,7 @@ final class AgentSession: ObservableObject {
                 }
 
                 updateTokenEstimate()
+                checkCompactionHint()
                 if estimatedTokensUsed > maxTokenBudget {
                     onTextDelta?("\n\n[Token budget exceeded — summarizing results]")
                     break
@@ -483,6 +509,63 @@ final class AgentSession: ObservableObject {
         var activity = ToolActivity(toolName: toolCall.name, summary: summary)
         toolActivities.append(activity)
         onToolActivityUpdate?(activity)
+
+        // Permission check (Phase 3)
+        if let permissionManager = context.permissionManager {
+            let decision = permissionManager.evaluate(
+                toolName: toolCall.name,
+                arguments: toolCall.arguments
+            )
+
+            switch decision {
+            case .deny(let reason):
+                let content = "[Permission denied] \(reason)"
+                if let idx = toolActivities.firstIndex(where: { $0.id == activity.id }) {
+                    toolActivities[idx].status = .failed
+                    toolActivities[idx].resultPreview = content
+                    toolActivities[idx].completedAt = Date()
+                    activity = toolActivities[idx]
+                }
+                onToolActivityUpdate?(activity)
+                internalMessages.append(
+                    .toolResult(toolUseId: toolCall.id, content: content, isError: true))
+                return
+
+            case .promptUser:
+                let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    if let handler = onPermissionRequest {
+                        handler(toolCall.name, summary) { allowed in
+                            continuation.resume(returning: allowed)
+                        }
+                    } else {
+                        continuation.resume(returning: true)
+                    }
+                }
+
+                if !approved {
+                    let content = "[Permission denied by user]"
+                    if let idx = toolActivities.firstIndex(where: { $0.id == activity.id }) {
+                        toolActivities[idx].status = .failed
+                        toolActivities[idx].resultPreview = content
+                        toolActivities[idx].completedAt = Date()
+                        activity = toolActivities[idx]
+                    }
+                    onToolActivityUpdate?(activity)
+                    internalMessages.append(
+                        .toolResult(toolUseId: toolCall.id, content: content, isError: true))
+                    return
+                }
+
+                // Grant session allowance so same action won't prompt again
+                permissionManager.grantSessionForToolCall(
+                    toolName: toolCall.name,
+                    arguments: toolCall.arguments
+                )
+
+            case .allow:
+                break
+            }
+        }
 
         let result = await toolRegistry.execute(
             name: toolCall.name,
@@ -648,6 +731,14 @@ final class AgentSession: ObservableObject {
 
         if internalMessages.count >= 2 {
             internalMessages.insert(.system(contextBlock), at: 1)
+        }
+    }
+
+    /// Check if compaction should be suggested and emit a hint.
+    private func checkCompactionHint() {
+        let threshold = Double(maxTokenBudget) * 0.75
+        if Double(estimatedTokensUsed) >= threshold {
+            onTextDelta?("\n\n> Tip: Context is getting large (\(estimatedTokensUsed) estimated tokens). Use `/compact` to summarize the conversation.\n\n")
         }
     }
 

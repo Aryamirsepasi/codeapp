@@ -33,6 +33,16 @@
 		673266BE8647DAD8CBBF06D1 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D069B4CE55069AD5021AAE4 /* AgentTools.swift */; };
 		624D2FD9C89858B781D32DA6 /* SearchReplaceBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */; };
 		79A8B16D98359838910B14CC /* SearchReplaceBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */; };
+		BB01BB01BB01BB01BB01BB01 /* RulesEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA01AA01AA01AA01AA01AA01 /* RulesEngine.swift */; };
+		CC01CC01CC01CC01CC01CC01 /* RulesEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA01AA01AA01AA01AA01AA01 /* RulesEngine.swift */; };
+		BB02BB02BB02BB02BB02BB02 /* SlashCommandEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02AA02AA02AA02AA02AA02 /* SlashCommandEngine.swift */; };
+		CC02CC02CC02CC02CC02CC02 /* SlashCommandEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA02AA02AA02AA02AA02AA02 /* SlashCommandEngine.swift */; };
+		BB03BB03BB03BB03BB03BB03 /* PermissionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA03AA03AA03AA03AA03AA03 /* PermissionManager.swift */; };
+		CC03CC03CC03CC03CC03CC03 /* PermissionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA03AA03AA03AA03AA03AA03 /* PermissionManager.swift */; };
+		BB04BB04BB04BB04BB04BB04 /* CompactionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04AA04AA04AA04AA04AA04 /* CompactionService.swift */; };
+		CC04CC04CC04CC04CC04CC04 /* CompactionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA04AA04AA04AA04AA04AA04 /* CompactionService.swift */; };
+		BB05BB05BB05BB05BB05BB05 /* MemoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05AA05AA05AA05AA05AA05 /* MemoryManager.swift */; };
+		CC05CC05CC05CC05CC05CC05 /* MemoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA05AA05AA05AA05AA05AA05 /* MemoryManager.swift */; };
 		42DFBA4A2EC37158009D2E88 /* MLXEmbedders in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA492EC37158009D2E88 /* MLXEmbedders */; };
 		42DFBA4C2EC37158009D2E88 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA4B2EC37158009D2E88 /* MLXLLM */; };
 		42DFBA4E2EC37158009D2E88 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 42DFBA4D2EC37158009D2E88 /* MLXLMCommon */; };
@@ -1455,6 +1465,11 @@
 		2A06A077FDEA46158A8AA02A /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
 		0D069B4CE55069AD5021AAE4 /* AgentTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTools.swift; sourceTree = "<group>"; };
 		D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchReplaceBlock.swift; sourceTree = "<group>"; };
+		AA01AA01AA01AA01AA01AA01 /* RulesEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesEngine.swift; sourceTree = "<group>"; };
+		AA02AA02AA02AA02AA02AA02 /* SlashCommandEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandEngine.swift; sourceTree = "<group>"; };
+		AA03AA03AA03AA03AA03AA03 /* PermissionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionManager.swift; sourceTree = "<group>"; };
+		AA04AA04AA04AA04AA04AA04 /* CompactionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactionService.swift; sourceTree = "<group>"; };
+		AA05AA05AA05AA05AA05AA05 /* MemoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryManager.swift; sourceTree = "<group>"; };
 		42F204F72EC2154300FCE150 /* AIAssistantExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIAssistantExtension.swift; sourceTree = "<group>"; };
 		4F30816829662CBF002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4F30816929662D58002708FD /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -2260,6 +2275,11 @@
 				2A06A077FDEA46158A8AA02A /* AgentSession.swift */,
 				0D069B4CE55069AD5021AAE4 /* AgentTools.swift */,
 				D349FDAE0C18BC161CC02F63 /* SearchReplaceBlock.swift */,
+				AA01AA01AA01AA01AA01AA01 /* RulesEngine.swift */,
+				AA02AA02AA02AA02AA02AA02 /* SlashCommandEngine.swift */,
+				AA03AA03AA03AA03AA03AA03 /* PermissionManager.swift */,
+				AA04AA04AA04AA04AA04AA04 /* CompactionService.swift */,
+				AA05AA05AA05AA05AA05AA05 /* MemoryManager.swift */,
 			);
 			path = Assistant;
 			sourceTree = "<group>";
@@ -3796,6 +3816,11 @@
 				0A5911634BBEAE9991E99D84 /* AgentSession.swift in Sources */,
 				E29A60A8B75FE0B5C7221335 /* AgentTools.swift in Sources */,
 				624D2FD9C89858B781D32DA6 /* SearchReplaceBlock.swift in Sources */,
+				BB01BB01BB01BB01BB01BB01 /* RulesEngine.swift in Sources */,
+				BB02BB02BB02BB02BB02BB02 /* SlashCommandEngine.swift in Sources */,
+				BB03BB03BB03BB03BB03BB03 /* PermissionManager.swift in Sources */,
+				BB04BB04BB04BB04BB04BB04 /* CompactionService.swift in Sources */,
+				BB05BB05BB05BB05BB05BB05 /* MemoryManager.swift in Sources */,
 				429FBC7A2EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */,
 				429FBC7D2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */,
 				429FBC802EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */,
@@ -4002,6 +4027,11 @@
 				5F40A435377DC859235CD569 /* AgentSession.swift in Sources */,
 				673266BE8647DAD8CBBF06D1 /* AgentTools.swift in Sources */,
 				79A8B16D98359838910B14CC /* SearchReplaceBlock.swift in Sources */,
+				CC01CC01CC01CC01CC01CC01 /* RulesEngine.swift in Sources */,
+				CC02CC02CC02CC02CC02CC02 /* SlashCommandEngine.swift in Sources */,
+				CC03CC03CC03CC03CC03CC03 /* PermissionManager.swift in Sources */,
+				CC04CC04CC04CC04CC04CC04 /* CompactionService.swift in Sources */,
+				CC05CC05CC05CC05CC05CC05 /* MemoryManager.swift in Sources */,
 				429FBC772EC2711500E8AD97 /* CodeAssistantPanel.swift in Sources */,
 				429FBC7B2EC2711500E8AD97 /* CodebaseSearchView.swift in Sources */,
 				429FBC7E2EC2711500E8AD97 /* InlineSuggestionService.swift in Sources */,

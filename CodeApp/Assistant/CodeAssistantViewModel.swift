@@ -164,6 +164,14 @@ final class CodeAssistantViewModel: ObservableObject {
     @Published var agentSession: AgentSession?
     @Published var currentToolActivities: [ToolActivity] = []
 
+    // MARK: - New Services (Phases 1-6)
+
+    let rulesEngine = RulesEngine()
+    let slashCommandEngine = SlashCommandEngine()
+    let permissionManager = PermissionManager()
+    let compactionService = CompactionService()
+    let memoryManager = MemoryManager()
+
     var currentModel: String {
         modelOverrides[selectedProvider] ?? selectedProvider.defaultModel
     }
@@ -359,6 +367,13 @@ final class CodeAssistantViewModel: ObservableObject {
         - Report what files you changed and summarize the changes made.
         """
 
+    /// System prompt with rules injected for chat mode.
+    private var effectiveSystemPrompt: String {
+        let rules = rulesEngine.rulesContent(forFilePath: nil, mode: "chat")
+        if rules.isEmpty { return systemPrompt }
+        return systemPrompt + "\n\n<rules>\n\(rules)\n</rules>"
+    }
+
     private static let providerDefaultsKey = "codeassistant.provider.active"
     private static let temperatureDefaultsKey = "codeassistant.temperature"
     private static let agentModeDefaultsKey = "codeassistant.agentMode"
@@ -445,6 +460,29 @@ final class CodeAssistantViewModel: ObservableObject {
         errorMessage = nil
         activeConversationID = UUID()
         activeConversationTitle = "New Chat"
+        permissionManager.clearSession()
+    }
+
+    /// Configure all services for the current workspace. Call when workspace changes.
+    func configureForWorkspace() {
+        guard let app, let workspaceURL = app.workSpaceStorage.currentDirectory._url else { return }
+
+        // Load rules
+        Task {
+            _ = await rulesEngine.loadRules(workspaceRoot: workspaceURL)
+        }
+
+        // Scan commands
+        slashCommandEngine.scan(workspaceRoot: workspaceURL)
+
+        // Load permissions
+        permissionManager.loadForWorkspace(root: workspaceURL)
+
+        // Configure memory
+        memoryManager.configure(workspaceRoot: workspaceURL)
+        Task {
+            _ = await memoryManager.loadIndex()
+        }
     }
 
     func loadConversation(_ conversation: Conversation) {
@@ -483,6 +521,14 @@ final class CodeAssistantViewModel: ObservableObject {
         guard !trimmed.isEmpty || !attachments.isEmpty else {
             return
         }
+
+        // Slash command interception (Phase 2)
+        if trimmed.hasPrefix("/"), let (command, arguments) = slashCommandEngine.resolve(input: trimmed) {
+            currentInput = ""
+            dispatchSlashCommand(command, arguments: arguments)
+            return
+        }
+
         let userPayload = buildPayload(for: trimmed, attachments: attachments)
 
         let userMessage = Message(
@@ -588,7 +634,10 @@ final class CodeAssistantViewModel: ObservableObject {
             workspaceRoot: workspaceURL,
             monacoInstance: app.monacoInstance,
             activeFileURL: app.activeTextEditor?.url,
-            workspaceIndexer: app.workspaceIndexer
+            workspaceIndexer: app.workspaceIndexer,
+            rulesEngine: rulesEngine,
+            permissionManager: permissionManager,
+            memoryManager: memoryManager
         )
 
         let session = AgentSession(
@@ -615,9 +664,31 @@ final class CodeAssistantViewModel: ObservableObject {
             }
         }
 
+        // Permission request handler (Phase 3)
+        session.onPermissionRequest = { [weak self] toolName, description, completion in
+            guard let self, let app = self.app else {
+                completion(false)
+                return
+            }
+            app.notificationManager.postActionNotification(
+                title: "Allow \(ToolActivity.displayName(for: toolName).lowercased())?",
+                level: .warning,
+                primary: { completion(true) },
+                primaryTitle: "Allow",
+                secondary: { completion(false) },
+                secondaryTitle: "Deny",
+                source: description
+            )
+        }
+
         session.onComplete = { [weak self] in
             self?.finalizeStream(for: placeholderID)
             self?.agentSession = nil
+
+            // Memory evaluation (Phase 5)
+            if let self {
+                self.evaluateMemoryPersistence()
+            }
         }
 
         session.onError = { [weak self] error in
@@ -731,7 +802,7 @@ final class CodeAssistantViewModel: ObservableObject {
             maxTokens: 8192,
             messages: anthropicMessages(from: history),
             model: model,
-            system: .text(systemPrompt),
+            system: .text(effectiveSystemPrompt),
             temperature: temperature
         )
 
@@ -751,7 +822,7 @@ final class CodeAssistantViewModel: ObservableObject {
 
     private func openAIMessages(from history: [Message]) -> [OpenAIChatCompletionRequestBody.Message] {
         var payload: [OpenAIChatCompletionRequestBody.Message] = [
-            .system(content: .text(systemPrompt))
+            .system(content: .text(effectiveSystemPrompt))
         ]
         payload += history.compactMap { message in
             switch message.role {
@@ -768,7 +839,7 @@ final class CodeAssistantViewModel: ObservableObject {
 
     private func openRouterMessages(from history: [Message]) -> [OpenRouterChatCompletionRequestBody.Message] {
         var payload: [OpenRouterChatCompletionRequestBody.Message] = [
-            .system(content: .text(systemPrompt))
+            .system(content: .text(effectiveSystemPrompt))
         ]
         payload += history.compactMap { message in
             switch message.role {
@@ -924,7 +995,263 @@ final class CodeAssistantViewModel: ObservableObject {
         if history.count > 20 {
             history = Array(history.prefix(20))
         }
+
+        // Save session history for memory (Phase 5)
+        let sessionId = activeConversationID
+        let messageCopy = messages
+        Task {
+            await memoryManager.saveSessionHistory(messages: messageCopy, sessionId: sessionId)
+        }
     }
+
+    // MARK: - Slash Commands (Phase 2)
+
+    private func dispatchSlashCommand(_ command: SlashCommand, arguments: String) {
+        switch command.id {
+        case "clear":
+            clearConversation()
+
+        case "help":
+            let helpText = slashCommandEngine.commands.map { cmd in
+                "**\(cmd.name)** — \(cmd.description)"
+            }.joined(separator: "\n")
+
+            messages.append(Message(
+                role: .system,
+                body: "Available commands:\n\n\(helpText)",
+                payload: ""
+            ))
+
+        case "compact":
+            performCompaction(arguments: arguments)
+
+        case "init":
+            performProjectInit(arguments: arguments)
+
+        default:
+            // Custom command: substitute $ARGUMENTS and send as user message
+            let body = command.body.replacingOccurrences(of: "$ARGUMENTS", with: arguments)
+            currentInput = body
+            sendMessage()
+        }
+    }
+
+    // MARK: - Compaction (Phase 4)
+
+    private func performCompaction(arguments: String) {
+        guard !messages.isEmpty else {
+            errorMessage = "No messages to compact."
+            return
+        }
+
+        let messagesToCompact = messages
+        let provider = selectedProvider
+        let model = currentModel
+
+        messages.append(Message(
+            role: .system,
+            body: "Compacting conversation...",
+            payload: "",
+            isStreaming: true
+        ))
+        isStreaming = true
+
+        Task {
+            do {
+                let summary = try await compactionService.compact(
+                    messages: messagesToCompact,
+                    provider: provider,
+                    model: model,
+                    instructions: arguments
+                )
+
+                messages.removeAll()
+                messages.append(Message(
+                    role: .system,
+                    body: "**Conversation Summary**\n\n\(summary)",
+                    payload: summary
+                ))
+                isStreaming = false
+            } catch {
+                if let idx = messages.lastIndex(where: { $0.isStreaming }) {
+                    messages[idx].isStreaming = false
+                    messages[idx].errorDescription = error.localizedDescription
+                }
+                isStreaming = false
+                errorMessage = "Compaction failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Project Discovery (Phase 6)
+
+    private func performProjectInit(arguments: String) {
+        guard let app, let workspaceURL = app.workSpaceStorage.currentDirectory._url else {
+            errorMessage = "No workspace directory open."
+            return
+        }
+
+        messages.append(Message(
+            role: .system,
+            body: "Discovering project structure...",
+            payload: "",
+            isStreaming: true
+        ))
+        isStreaming = true
+
+        Task {
+            do {
+                // 1. Build file tree
+                let tree = await buildFileTree(root: workspaceURL, maxDepth: 3)
+
+                // 2. Detect and read config files
+                let configs = await detectAndReadConfigFiles(root: workspaceURL)
+
+                // 3. Send to LLM for rules generation
+                let prompt = """
+                Analyze this project and generate a `.codeapp/rules.md` file that will be injected as context \
+                for the AI coding assistant. Include:
+                - Project type and tech stack
+                - Key conventions and patterns to follow
+                - Important file paths and their purposes
+                - Build/run/test commands
+                - Any other helpful context for an AI assistant working in this project
+
+                Keep it concise (under 100 lines). Use markdown format.
+
+                \(arguments.isEmpty ? "" : "Additional instructions: \(arguments)\n")
+
+                FILE TREE:
+                \(tree)
+
+                CONFIG FILES:
+                \(configs)
+                """
+
+                let summary = try await compactionService.compact(
+                    messages: [Message(role: .user, body: prompt, payload: prompt)],
+                    provider: selectedProvider,
+                    model: currentModel,
+                    instructions: "Generate a rules file, not a summary."
+                )
+
+                // 4. Write to .codeapp/rules.md
+                let codeappDir = workspaceURL.appendingPathComponent(".codeapp")
+                try? FileManager.default.createDirectory(
+                    at: codeappDir, withIntermediateDirectories: true
+                )
+                let rulesFile = codeappDir.appendingPathComponent("rules.md")
+                try summary.data(using: .utf8)?.write(to: rulesFile)
+
+                // 5. Reload rules engine
+                await rulesEngine.reload(workspaceRoot: workspaceURL)
+
+                // 6. Show confirmation
+                if let idx = messages.lastIndex(where: { $0.isStreaming }) {
+                    messages[idx].isStreaming = false
+                    messages[idx].body = "Project initialized! Generated `.codeapp/rules.md`.\n\n\(summary)"
+                }
+                isStreaming = false
+
+            } catch {
+                if let idx = messages.lastIndex(where: { $0.isStreaming }) {
+                    messages[idx].isStreaming = false
+                    messages[idx].errorDescription = error.localizedDescription
+                }
+                isStreaming = false
+                errorMessage = "Project init failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func buildFileTree(root: URL, maxDepth: Int) async -> String {
+        var lines: [String] = []
+        let fm = FileManager.default
+        let skipDirs: Set<String> = [".git", "node_modules", ".build", "DerivedData", ".codeapp", "__pycache__", ".venv", "venv"]
+
+        func walk(url: URL, depth: Int, prefix: String) {
+            guard depth < maxDepth else { return }
+            guard let contents = try? fm.contentsOfDirectory(
+                at: url, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { return }
+
+            let sorted = contents.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            for item in sorted {
+                let name = item.lastPathComponent
+                let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+
+                if isDir && skipDirs.contains(name) { continue }
+
+                lines.append("\(prefix)\(isDir ? "\(name)/" : name)")
+                if isDir {
+                    walk(url: item, depth: depth + 1, prefix: prefix + "  ")
+                }
+            }
+        }
+
+        walk(url: root, depth: 0, prefix: "")
+        return lines.joined(separator: "\n")
+    }
+
+    private func detectAndReadConfigFiles(root: URL) async -> String {
+        let configNames = [
+            "Package.swift", "package.json", "Cargo.toml", "Makefile",
+            "requirements.txt", "pyproject.toml", ".gitignore", "README.md",
+            "tsconfig.json", "build.gradle", "pom.xml", "go.mod",
+            "Gemfile", "composer.json", "CMakeLists.txt",
+        ]
+        let fm = FileManager.default
+        var result: [String] = []
+
+        for name in configNames {
+            let url = root.appendingPathComponent(name)
+            guard fm.fileExists(atPath: url.path),
+                  let data = try? Data(contentsOf: url),
+                  let content = String(data: data, encoding: .utf8)
+            else { continue }
+
+            // Truncate README to first 100 lines
+            var text = content
+            if name == "README.md" {
+                let lines = text.components(separatedBy: .newlines)
+                if lines.count > 100 {
+                    text = lines.prefix(100).joined(separator: "\n") + "\n[truncated]"
+                }
+            }
+            // Cap all config files at 5000 chars
+            if text.count > 5000 {
+                text = String(text.prefix(5000)) + "\n[truncated]"
+            }
+
+            result.append("--- \(name) ---\n\(text)")
+        }
+
+        return result.joined(separator: "\n\n")
+    }
+
+    // MARK: - Memory Evaluation (Phase 5)
+
+    private func evaluateMemoryPersistence() {
+        guard let lastAssistant = messages.last(where: { $0.role == .assistant }),
+              !lastAssistant.body.isEmpty
+        else { return }
+
+        let turn = lastAssistant.body
+        let provider = selectedProvider
+        let model = currentModel
+
+        Task {
+            let (persist, fact, topic) = await memoryManager.evaluateForPersistence(
+                turn: turn, provider: provider, model: model
+            )
+            if persist {
+                await memoryManager.persist(fact: fact, topic: topic)
+            }
+        }
+    }
+
+    // MARK: - Private Helpers
 
     private func deriveTitle(from messages: [Message]) -> String {
         if let firstUser = messages.first(where: { $0.role == .user }) {
